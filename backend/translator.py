@@ -41,18 +41,23 @@ _MULTI_SPACE_RE = re.compile(r"\s+")
 _SPACE_BEFORE_PUNCT_RE = re.compile(r"\s+([,.;:!?])")
 
 AI_TTS_SYSTEM_PROMPT = (
-    "Bạn là chuyên gia AI/ML người Việt đang đọc và giải thích bài báo khoa học thành tiếng (TTS). "
-    "Hãy dịch câu tiếng Anh sau sang tiếng Việt thật tự nhiên, dễ hiểu, mạch lạc, đúng ngữ cảnh học thuật.\n"
-    "QUY TẮC BẮT BUỘC:\n"
-    "1. GIỮ NGUYÊN tiếng Anh (KHÔNG dịch thô sang tiếng Việt) đối với các thuật ngữ chuyên ngành AI/ML/CS phổ biến như: "
+    "Bạn là chuyên gia AI/ML người Việt đang đọc bài báo khoa học thành tiếng (TTS). "
+    "Dịch câu tiếng Anh sang tiếng Việt tự nhiên, mạch lạc, dễ hiểu.\n"
+    "QUY TẮC:\n"
+    "1. BẮT BUỘC GIỮ NGUYÊN tiếng Anh (không dịch sang tiếng Việt) các thuật ngữ AI/ML/CS: "
     "supervised learning, semi-supervised learning, self-supervised learning, unsupervised learning, contrastive learning, "
     "reinforcement learning, batch size, epoch, data augmentation, fine-tuning, pre-training, backbone, embedding, "
-    "feature, layer, transformer, attention, loss, gradient, benchmark, dataset, baseline, ablation, zero-shot, few-shot, "
-    "overfitting, pipeline, framework, token, prompt, encoder, decoder, linear evaluation, memory bank, "
-    "và tên mô hình/bộ dữ liệu (SimCLR, ResNet, ImageNet, AlexNet, BERT, GPT, ViT, CIFAR...).\n"
-    "2. KHÔNG dùng bất kỳ ký tự markdown nào (không **in đậm**, không *in nghiêng*, không `code`, không ngoặc kép bọc cả câu).\n"
-    "3. Không giải thích thêm, không mở đầu, không lặp lại câu gốc. Chỉ trả về DUY NHẤT câu dịch tiếng Việt sẵn sàng để đọc to.\n"
-    "4. Chuyển nhẹ ký hiệu cho TTS đọc trôi chảy: ví dụ '100×' -> '100 lần', '76.5%' -> '76,5 phần trăm'."
+    "feature, layer, transformer, attention, contrastive loss, loss, gradient, benchmark, dataset, baseline, ablation, "
+    "zero-shot, few-shot, overfitting, pipeline, framework, token, prompt, encoder, decoder, linear evaluation, "
+    "memory bank, SimCLR, ResNet, ImageNet, AlexNet, BERT, GPT, ViT.\n"
+    "2. BẮT BUỘC phải dịch phần ngữ pháp và câu chữ còn lại sang tiếng Việt (tuyệt đối không trả lại nguyên câu tiếng Anh).\n"
+    "3. Không markdown (không **, *, `), không ngoặc kép bọc câu, không giải thích. Chỉ trả về duy nhất câu dịch.\n"
+    "4. Chuyển ký hiệu số để TTS đọc trôi chảy: '100×' -> '100 lần', '76.5%' -> '76,5 phần trăm'.\n"
+    "VÍ DỤ:\n"
+    "Input: Contrastive learning benefits from larger batch sizes and more training epochs than supervised learning.\n"
+    "Output: Contrastive learning hưởng lợi từ batch size lớn hơn và nhiều epoch huấn luyện hơn so với supervised learning.\n"
+    "Input: Composition of data augmentations is crucial for self-supervised learning frameworks.\n"
+    "Output: Việc kết hợp nhiều phép data augmentation đóng vai trò then chốt cho các framework self-supervised learning."
 )
 
 # Persistent keep-alive HTTP client (reuses TLS sockets for low latency)
@@ -413,7 +418,12 @@ def translate_text(
         for name, fn in (("groq", run_groq), ("gemini", run_gemini)):
             try:
                 translated = clean_llm_output_for_tts(fn(cleaned, cfg))
-                if translated:
+                # Reject untranslated English echo when translating long sentences to Vietnamese
+                if translated and (
+                    cfg.target_lang != "vi"
+                    or len(cleaned) < 20
+                    or is_likely_vietnamese(translated)
+                ):
                     return TranslationResult(
                         source_text=text,
                         cleaned_source_text=cleaned,

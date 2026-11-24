@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 import io
 import os
@@ -10,7 +11,7 @@ import re
 import threading
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 import numpy as np
 import soundfile as sf
@@ -34,6 +35,16 @@ load_local_env()
 
 class TranslateRequest(BaseModel):
     text: str
+    provider: str = "smart_ai"
+    source_lang: str = "en"
+    target_lang: str = "vi"
+    openai_base_url: Optional[str] = None
+    openai_api_key: Optional[str] = None
+    openai_model: Optional[str] = None
+
+
+class TranslateBatchRequest(BaseModel):
+    texts: List[str]
     provider: str = "smart_ai"
     source_lang: str = "en"
     target_lang: str = "vi"
@@ -141,6 +152,70 @@ def create_app(
         }
         cache.set_json(t_key, payload)
         return {**payload, "cached": False}
+
+    @app.post("/api/translate-batch")
+    def api_translate_batch(req: TranslateBatchRequest):
+        if not req.texts:
+            return {"items": [], "newlyTranslated": 0, "latencyMs": 0}
+
+        t0 = time.perf_counter()
+        batch = req.texts[:24]
+        cfg = TranslationConfig(
+            provider=req.provider,
+            source_lang=req.source_lang,
+            target_lang=req.target_lang,
+            openai_base_url=req.openai_base_url,
+            openai_api_key=req.openai_api_key,
+            openai_model=req.openai_model,
+        )
+
+        results: List[Optional[dict]] = [None] * len(batch)
+        to_translate: List[tuple[int, str, str]] = []
+
+        for idx, raw_item in enumerate(batch):
+            raw = (raw_item or "").strip()
+            if not raw:
+                results[idx] = {
+                    "sourceText": "",
+                    "cleanedSourceText": "",
+                    "translatedText": "",
+                    "wasTranslated": False,
+                    "provider": "passthrough",
+                    "cached": True,
+                }
+                continue
+            t_key = cache.make_key("tr", raw, cfg.provider, cfg.source_lang, cfg.target_lang, cfg.openai_model or "")
+            cached = cache.get_json(t_key)
+            if cached and cached.get("translatedText"):
+                results[idx] = {**cached, "cached": True}
+            else:
+                to_translate.append((idx, raw, t_key))
+
+        if to_translate:
+            workers = min(6, len(to_translate))
+
+            def _translate_one(entry: tuple[int, str, str]):
+                idx, raw, t_key = entry
+                res = translate_text(raw, config=cfg, google_fetcher=google_fetcher)
+                payload = {
+                    "sourceText": res.source_text,
+                    "cleanedSourceText": res.cleaned_source_text,
+                    "translatedText": res.translated_text,
+                    "wasTranslated": res.was_translated,
+                    "provider": res.provider,
+                }
+                cache.set_json(t_key, payload)
+                return idx, {**payload, "cached": False}
+
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                for idx, payload in pool.map(_translate_one, to_translate):
+                    results[idx] = payload
+
+        return {
+            "items": results,
+            "newlyTranslated": len(to_translate),
+            "latencyMs": int(round((time.perf_counter() - t0) * 1000)),
+        }
 
     @app.post("/api/read-sentence")
     def read_sentence(req: ReadSentenceRequest):

@@ -122,6 +122,45 @@ class TestBackendAPI(unittest.TestCase):
         self.assertEqual(resp.json()["id"], "my_custom_voice")
         self.assertTrue((self.engine.primary_cloned_dir / "my_custom_voice.wav").exists())
 
+    def test_translate_batch_translates_concurrently_and_populates_read_sentence_cache(self):
+        translate_calls = []
+
+        def counting_google(text, s, t):
+            translate_calls.append(text)
+            return f"Dịch: {text}"
+
+        app = create_app(
+            tts_engine=self.engine,
+            cache_dir=Path(self._tmp.name) / "batch_cache",
+            google_fetcher=counting_google,
+        )
+        client = TestClient(app)
+
+        sentences = [
+            "First sentence about supervised learning.",
+            "Second sentence about batch size.",
+            "Third sentence about training epochs.",
+        ]
+        r_batch = client.post(
+            "/api/translate-batch",
+            json={"texts": sentences, "provider": "google"},
+        )
+        self.assertEqual(r_batch.status_code, 200)
+        items = r_batch.json()["items"]
+        self.assertEqual(len(items), 3)
+        self.assertEqual(items[0]["translatedText"], "Dịch: First sentence about supervised learning.")
+        self.assertEqual(items[2]["translatedText"], "Dịch: Third sentence about training epochs.")
+        self.assertEqual(len(translate_calls), 3)
+
+        # Calling /api/read-sentence afterwards must reuse cached translation with 0 new translator calls
+        r_read = client.post(
+            "/api/read-sentence",
+            json={"text": sentences[1], "voice": "hai_dang", "provider": "google"},
+        )
+        self.assertEqual(r_read.status_code, 200)
+        self.assertEqual(r_read.json()["translatedText"], "Dịch: Second sentence about batch size.")
+        self.assertEqual(len(translate_calls), 3)
+
 
 if __name__ == "__main__":
     unittest.main()

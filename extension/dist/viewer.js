@@ -21799,17 +21799,58 @@ function getSyncStateAtTime(currentTimeMs, durationMs, wordTimings = [], sourceW
 
 // src/core/prefetchQueue.js
 var PrefetchQueue = class {
-  constructor({ fetcher, lookahead = 2, maxCacheSize = 40 } = {}) {
+  constructor({
+    fetcher,
+    batchTranslator = null,
+    lookahead = 4,
+    translateBatchSize = 12,
+    maxCacheSize = 60,
+    onBufferChange = null
+  } = {}) {
     if (typeof fetcher !== "function") {
       throw new Error("PrefetchQueue requires a fetcher function");
     }
     this.fetcher = fetcher;
+    this.batchTranslator = typeof batchTranslator === "function" ? batchTranslator : null;
     this.lookahead = Math.max(0, lookahead);
-    this.maxCacheSize = Math.max(5, maxCacheSize);
+    this.translateBatchSize = Math.max(1, translateBatchSize);
+    this.maxCacheSize = Math.max(8, maxCacheSize);
+    this.onBufferChange = typeof onBufferChange === "function" ? onBufferChange : null;
     this._cache = /* @__PURE__ */ new Map();
     this._inflight = /* @__PURE__ */ new Map();
+    this._translations = /* @__PURE__ */ new Map();
+    this._translatingIds = /* @__PURE__ */ new Set();
     this._controllers = /* @__PURE__ */ new Set();
     this._generation = 0;
+    this._bgRunning = false;
+    this._bgAnchorSentences = null;
+    this._bgAnchorIndex = -1;
+    this._bgTargetCount = 0;
+  }
+  has(sentenceId) {
+    return this._cache.has(sentenceId);
+  }
+  getTranslation(sentenceId) {
+    return this._translations.get(sentenceId) || null;
+  }
+  countBufferedAhead(sentences, index) {
+    if (!Array.isArray(sentences) || index < 0) return 0;
+    let count = 0;
+    for (let offset = 1; offset <= this.lookahead; offset++) {
+      const s = sentences[index + offset];
+      if (!s) break;
+      if (this._cache.has(s.id)) count += 1;
+      else break;
+    }
+    return count;
+  }
+  _notifyBuffer() {
+    if (this.onBufferChange) {
+      try {
+        this.onBufferChange();
+      } catch {
+      }
+    }
   }
   _fetchOne(sentence, generation) {
     const key = sentence.id;
@@ -21830,10 +21871,17 @@ var PrefetchQueue = class {
     const promise = rawPromise.then((result) => {
       if (generation === this._generation) {
         this._cache.set(key, result);
+        if (result?.translatedText && !this._translations.has(key)) {
+          this._translations.set(key, {
+            translatedText: result.translatedText,
+            provider: result.provider || ""
+          });
+        }
         if (this._cache.size > this.maxCacheSize) {
           const oldestKey = this._cache.keys().next().value;
           this._cache.delete(oldestKey);
         }
+        this._notifyBuffer();
       }
       return result;
     }).finally(() => {
@@ -21845,17 +21893,93 @@ var PrefetchQueue = class {
     this._inflight.set(key, promise);
     return promise;
   }
-  has(sentenceId) {
-    return this._cache.has(sentenceId);
-  }
-  warm(sentences, index) {
-    if (!Array.isArray(sentences) || index < 0 || index >= sentences.length) return;
+  /**
+   * Kick off a parallel multi-threaded batch translation for upcoming sentences.
+   */
+  warmTranslations(sentences, startIndex) {
+    if (!this.batchTranslator || !Array.isArray(sentences) || startIndex < 0) return;
     const gen = this._generation;
-    const target = sentences[index];
-    if (target && !this._cache.has(target.id) && !this._inflight.has(target.id)) {
-      this._fetchOne(target, gen).catch(() => {
-      });
+    const end = Math.min(sentences.length, startIndex + this.translateBatchSize);
+    const pending = [];
+    for (let i = startIndex; i < end; i++) {
+      const s = sentences[i];
+      if (!s) continue;
+      if (this._cache.has(s.id) || this._translations.has(s.id) || this._translatingIds.has(s.id)) {
+        continue;
+      }
+      pending.push(s);
     }
+    if (!pending.length) return;
+    for (const s of pending) this._translatingIds.add(s.id);
+    const controller = new AbortController();
+    this._controllers.add(controller);
+    Promise.resolve().then(() => this.batchTranslator(pending, controller.signal)).then((items) => {
+      if (gen !== this._generation || !Array.isArray(items)) return;
+      for (let i = 0; i < pending.length; i++) {
+        const item = items[i];
+        if (item?.translatedText) {
+          this._translations.set(pending[i].id, {
+            translatedText: item.translatedText,
+            provider: item.provider || ""
+          });
+        }
+      }
+      this._notifyBuffer();
+    }).catch(() => {
+    }).finally(() => {
+      this._controllers.delete(controller);
+      for (const s of pending) this._translatingIds.delete(s.id);
+    });
+  }
+  /**
+   * Sequentially pre-synthesize audio one sentence at a time starting from _bgAnchorIndex.
+   * Ensures i+1 ALWAYS finishes before i+2 starts, preventing lock inversion on CPU TTS.
+   */
+  async _pumpAudioPrefetch(gen) {
+    if (this._bgRunning) return;
+    this._bgRunning = true;
+    try {
+      while (gen === this._generation) {
+        const sentences = this._bgAnchorSentences;
+        const start = this._bgAnchorIndex;
+        const count = this._bgTargetCount;
+        if (!Array.isArray(sentences) || start < 0 || count <= 0) break;
+        let nextSentence = null;
+        const limit = Math.min(sentences.length, start + count);
+        for (let i = start; i < limit; i++) {
+          const candidate = sentences[i];
+          if (candidate && !this._cache.has(candidate.id)) {
+            nextSentence = candidate;
+            break;
+          }
+        }
+        if (!nextSentence) break;
+        try {
+          await this._fetchOne(nextSentence, gen);
+        } catch {
+          break;
+        }
+      }
+    } finally {
+      this._bgRunning = false;
+    }
+  }
+  _scheduleAudioPipeline(sentences, startIndex, count, gen) {
+    this._bgAnchorSentences = sentences;
+    this._bgAnchorIndex = startIndex;
+    this._bgTargetCount = count;
+    if (!this._bgRunning && count > 0) {
+      this._pumpAudioPrefetch(gen);
+    }
+  }
+  /**
+   * Proactively pre-translate a batch and sequentially pre-buffer the first few audio clips.
+   */
+  warm(sentences, startIndex = 0, audioCount = 3) {
+    if (!Array.isArray(sentences) || startIndex < 0 || startIndex >= sentences.length) return;
+    const gen = this._generation;
+    this.warmTranslations(sentences, startIndex);
+    this._scheduleAudioPipeline(sentences, startIndex, Math.min(audioCount, this.lookahead + 1), gen);
   }
   async get(sentences, index) {
     if (!Array.isArray(sentences) || index < 0 || index >= sentences.length) {
@@ -21863,20 +21987,18 @@ var PrefetchQueue = class {
     }
     const gen = this._generation;
     const current = sentences[index];
+    this.warmTranslations(sentences, index);
     const result = await this._fetchOne(current, gen);
-    if (gen === this._generation) {
-      for (let offset = 1; offset <= this.lookahead; offset++) {
-        const nextSentence = sentences[index + offset];
-        if (nextSentence) {
-          this._fetchOne(nextSentence, gen).catch(() => {
-          });
-        }
-      }
+    if (gen === this._generation && this.lookahead > 0) {
+      this._scheduleAudioPipeline(sentences, index + 1, this.lookahead, gen);
     }
     return result;
   }
   invalidate() {
     this._generation += 1;
+    this._bgAnchorSentences = null;
+    this._bgAnchorIndex = -1;
+    this._bgTargetCount = 0;
     for (const controller of this._controllers) {
       try {
         controller.abort();
@@ -21886,6 +22008,8 @@ var PrefetchQueue = class {
     this._controllers.clear();
     this._inflight.clear();
     this._cache.clear();
+    this._translations.clear();
+    this._translatingIds.clear();
   }
 };
 
@@ -21916,6 +22040,16 @@ var VieNeuApiClient = class {
   }
   async translate(payload, signal) {
     const resp = await fetch(`${this.baseUrl}/api/translate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return await resp.json();
+  }
+  async translateBatch(payload, signal) {
+    const resp = await fetch(`${this.baseUrl}/api/translate-batch`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -22126,7 +22260,7 @@ async function connectBackend(silent = false) {
     }
     await refreshVoices();
     if (state.analyzed?.sentences?.length && !state.isPlaying) {
-      state.prefetchQueue?.warm(state.analyzed.sentences, state.currentSentenceIndex);
+      state.prefetchQueue?.warm(state.analyzed.sentences, state.currentSentenceIndex, 3);
     }
   } catch {
     el.backendChip.className = "status-chip is-offline";
@@ -22175,10 +22309,42 @@ async function refreshVoices() {
   } catch {
   }
 }
+function updateBufferStatusLabel() {
+  if (!state.analyzed?.sentences?.length || !state.prefetchQueue) return;
+  if (state.isLoadingAudio) return;
+  const ahead = state.prefetchQueue.countBufferedAhead(
+    state.analyzed.sentences,
+    state.currentSentenceIndex
+  );
+  if (state.activePayload && state.isPlaying) {
+    const provTag = state.activePayload.provider ? ` \xB7 ${state.activePayload.provider}` : "";
+    const bufTag = ahead > 0 ? ` \xB7 \u0110\u1EC7m s\u1EB5n +${ahead} c\xE2u` : "";
+    el.captionStateText.textContent = state.activePayload.cached ? `VieNeu-TTS \xB7 Cache (${state.activePayload.voice}${provTag})${bufTag}` : `VieNeu-TTS \xB7 ${state.activePayload.latencyMs || 0}ms (${state.activePayload.voice}${provTag})${bufTag}`;
+  }
+}
 function buildPrefetchQueue() {
   if (state.prefetchQueue) state.prefetchQueue.invalidate();
   state.prefetchQueue = new PrefetchQueue({
-    lookahead: 3,
+    lookahead: 4,
+    translateBatchSize: 12,
+    onBufferChange: updateBufferStatusLabel,
+    batchTranslator: async (chunk, signal) => {
+      const s = state.settings;
+      if (s.provider === "passthrough") return [];
+      const res = await state.api.translateBatch(
+        {
+          texts: chunk.map((c) => c.text),
+          provider: s.provider,
+          source_lang: "en",
+          target_lang: "vi",
+          openai_base_url: s.openaiBaseUrl || void 0,
+          openai_model: s.openaiModel || void 0,
+          openai_api_key: s.openaiApiKey || void 0
+        },
+        signal
+      );
+      return res?.items || [];
+    },
     fetcher: (sentence, signal) => {
       const s = state.settings;
       return state.api.readSentence(
@@ -22346,7 +22512,7 @@ function reanalyzeLayout(resetIndex = false) {
     renderSentenceHighlights(active, null);
     updateCaptionIdle(active);
     if (el.backendChip.classList.contains("is-online")) {
-      state.prefetchQueue?.warm(state.analyzed.sentences, state.currentSentenceIndex);
+      state.prefetchQueue?.warm(state.analyzed.sentences, state.currentSentenceIndex, 3);
     }
   }
 }
@@ -22601,7 +22767,12 @@ async function playSentenceAt(index) {
   el.captionEnText.textContent = sentence.text;
   el.captionProgressFill.style.transform = "scaleX(0)";
   const previewAbort = new AbortController();
-  if (!state.prefetchQueue?.has(sentence.id) && state.settings.provider !== "passthrough") {
+  const preTranslated = state.prefetchQueue?.getTranslation(sentence.id);
+  if (preTranslated?.translatedText) {
+    el.captionViText.classList.remove("is-loading");
+    el.captionViText.textContent = preTranslated.translatedText;
+    el.captionStateText.textContent = `\u0110\xE3 d\u1ECBch s\u1EB5n (${preTranslated.provider || "AI"}) \xB7 \u0110ang t\u1EA1o gi\u1ECDng VieNeu\u2026`;
+  } else if (!state.prefetchQueue?.has(sentence.id) && state.settings.provider !== "passthrough") {
     const s = state.settings;
     state.api.translate(
       {
@@ -22631,8 +22802,7 @@ async function playSentenceAt(index) {
     state.isLoadingAudio = false;
     updateTransportButtons();
     renderVietnameseKaraoke(payload.wordTimings, payload.translatedText);
-    const provTag = payload.provider ? ` \xB7 ${payload.provider}` : "";
-    el.captionStateText.textContent = payload.cached ? `VieNeu-TTS \xB7 Cache (${payload.voice}${provTag})` : `VieNeu-TTS \xB7 ${payload.latencyMs || 0}ms (${payload.voice}${provTag})`;
+    updateBufferStatusLabel();
     state.activeAudioUrl = base64ToBlobUrl(payload.audioBase64, "audio/wav");
     state.audioEl.src = state.activeAudioUrl;
     state.audioEl.playbackRate = state.settings.speed;

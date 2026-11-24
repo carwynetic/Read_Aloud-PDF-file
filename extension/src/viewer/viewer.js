@@ -192,9 +192,9 @@ async function connectBackend(silent = false) {
       buildPrefetchQueue();
     }
     await refreshVoices();
-    // Silently pre-warm the first sentence so Play starts immediately
+    // Proactively batch-translate next 12 sentences + pre-buffer first 3 audio clips
     if (state.analyzed?.sentences?.length && !state.isPlaying) {
-      state.prefetchQueue?.warm(state.analyzed.sentences, state.currentSentenceIndex);
+      state.prefetchQueue?.warm(state.analyzed.sentences, state.currentSentenceIndex, 3);
     }
   } catch {
     el.backendChip.className = 'status-chip is-offline';
@@ -265,10 +265,45 @@ async function refreshVoices() {
   }
 }
 
+function updateBufferStatusLabel() {
+  if (!state.analyzed?.sentences?.length || !state.prefetchQueue) return;
+  if (state.isLoadingAudio) return;
+  const ahead = state.prefetchQueue.countBufferedAhead(
+    state.analyzed.sentences,
+    state.currentSentenceIndex
+  );
+  if (state.activePayload && state.isPlaying) {
+    const provTag = state.activePayload.provider ? ` · ${state.activePayload.provider}` : '';
+    const bufTag = ahead > 0 ? ` · Đệm sẵn +${ahead} câu` : '';
+    el.captionStateText.textContent = state.activePayload.cached
+      ? `VieNeu-TTS · Cache (${state.activePayload.voice}${provTag})${bufTag}`
+      : `VieNeu-TTS · ${state.activePayload.latencyMs || 0}ms (${state.activePayload.voice}${provTag})${bufTag}`;
+  }
+}
+
 function buildPrefetchQueue() {
   if (state.prefetchQueue) state.prefetchQueue.invalidate();
   state.prefetchQueue = new PrefetchQueue({
-    lookahead: 3,
+    lookahead: 4,
+    translateBatchSize: 12,
+    onBufferChange: updateBufferStatusLabel,
+    batchTranslator: async (chunk, signal) => {
+      const s = state.settings;
+      if (s.provider === 'passthrough') return [];
+      const res = await state.api.translateBatch(
+        {
+          texts: chunk.map((c) => c.text),
+          provider: s.provider,
+          source_lang: 'en',
+          target_lang: 'vi',
+          openai_base_url: s.openaiBaseUrl || undefined,
+          openai_model: s.openaiModel || undefined,
+          openai_api_key: s.openaiApiKey || undefined,
+        },
+        signal
+      );
+      return res?.items || [];
+    },
     fetcher: (sentence, signal) => {
       const s = state.settings;
       return state.api.readSentence(
@@ -467,7 +502,7 @@ function reanalyzeLayout(resetIndex = false) {
     renderSentenceHighlights(active, null);
     updateCaptionIdle(active);
     if (el.backendChip.classList.contains('is-online')) {
-      state.prefetchQueue?.warm(state.analyzed.sentences, state.currentSentenceIndex);
+      state.prefetchQueue?.warm(state.analyzed.sentences, state.currentSentenceIndex, 3);
     }
   }
 }
@@ -783,9 +818,14 @@ async function playSentenceAt(index) {
   el.captionEnText.textContent = sentence.text;
   el.captionProgressFill.style.transform = 'scaleX(0)';
 
-  // Fast Vietnamese subtitle preview (~400ms via Groq/Gemini) while VieNeu-TTS synthesizes audio
+  // Instant Vietnamese subtitle preview (0ms if batch-translated, else ~350ms fallback)
   const previewAbort = new AbortController();
-  if (!state.prefetchQueue?.has(sentence.id) && state.settings.provider !== 'passthrough') {
+  const preTranslated = state.prefetchQueue?.getTranslation(sentence.id);
+  if (preTranslated?.translatedText) {
+    el.captionViText.classList.remove('is-loading');
+    el.captionViText.textContent = preTranslated.translatedText;
+    el.captionStateText.textContent = `Đã dịch sẵn (${preTranslated.provider || 'AI'}) · Đang tạo giọng VieNeu…`;
+  } else if (!state.prefetchQueue?.has(sentence.id) && state.settings.provider !== 'passthrough') {
     const s = state.settings;
     state.api
       .translate(
@@ -820,10 +860,7 @@ async function playSentenceAt(index) {
     updateTransportButtons();
 
     renderVietnameseKaraoke(payload.wordTimings, payload.translatedText);
-    const provTag = payload.provider ? ` · ${payload.provider}` : '';
-    el.captionStateText.textContent = payload.cached
-      ? `VieNeu-TTS · Cache (${payload.voice}${provTag})`
-      : `VieNeu-TTS · ${payload.latencyMs || 0}ms (${payload.voice}${provTag})`;
+    updateBufferStatusLabel();
 
     state.activeAudioUrl = base64ToBlobUrl(payload.audioBase64, 'audio/wav');
     state.audioEl.src = state.activeAudioUrl;

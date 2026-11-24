@@ -91,6 +91,17 @@ class TestTranslator(unittest.TestCase):
         self.assertEqual(res.translated_text, "Học contrastive learning cần batch size lớn hơn.")
         self.assertNotIn("**", res.translated_text)
 
+    def test_smart_ai_rejects_untranslated_english_echo_and_fails_over(self):
+        src = "Contrastive learning benefits from larger batch sizes and more training epochs."
+        res = translate_text(
+            src,
+            config=TranslationConfig(provider="smart_ai", target_lang="vi"),
+            groq_fetcher=lambda text, cfg: text,  # Echoes English untranslated
+            gemini_fetcher=lambda text, cfg: "Contrastive learning hưởng lợi từ batch size lớn hơn và nhiều epoch hơn.",
+        )
+        self.assertEqual(res.provider, "gemini")
+        self.assertIn("hưởng lợi", res.translated_text)
+
 
 if __name__ == "__main__":
     unittest.main()
