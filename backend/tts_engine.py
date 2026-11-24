@@ -80,6 +80,7 @@ class HybridVieNeuEngine:
         self._backend_mode = "auto"
         self.is_warming_up: bool = False
         self.warmup_error: Optional[str] = None
+        self._gpu_name: Optional[str] = self._detect_cuda_gpu()
 
         local_cloned = Path(__file__).parent / "cloned_voices"
         local_cloned.mkdir(parents=True, exist_ok=True)
@@ -91,13 +92,27 @@ class HybridVieNeuEngine:
         ]
         self.primary_cloned_dir = self.cloned_dirs[0]
 
+    @staticmethod
+    def _detect_cuda_gpu() -> Optional[str]:
+        if os.environ.get("VIENEU_FORCE_CPU", "0") == "1":
+            return None
+        try:
+            import torch
+            if torch.cuda.is_available():
+                return torch.cuda.get_device_name(0)
+        except Exception:
+            pass
+        return None
+
     @property
     def backend_mode(self) -> str:
         if self._tts_model is not None:
+            if self._gpu_name and getattr(self._tts_model, "backend", "") == "pytorch":
+                return f"cuda ({self._gpu_name})"
             return f"local-v3turbo-{self.precision}"
-        if self._is_upstream_alive():
+        if not self._gpu_name and self._is_upstream_alive():
             return f"proxy-openmaic ({self.upstream_url})"
-        return "lazy-unloaded"
+        return f"cuda-ready ({self._gpu_name})" if self._gpu_name else "lazy-unloaded"
 
     def _is_upstream_alive(self) -> bool:
         now = time.monotonic()
@@ -127,17 +142,27 @@ class HybridVieNeuEngine:
                     return candidate
         return None
 
-    @staticmethod
-    def _has_local_hf_cache() -> bool:
+    def _has_local_hf_cache(self) -> bool:
         hf_hub = Path.home() / ".cache" / "huggingface" / "hub"
-        return (hf_hub / "models--pnnbao-ump--VieNeu-TTS-v3-Turbo").exists()
+        turbo_dir = hf_hub / "models--pnnbao-ump--VieNeu-TTS-v3-Turbo"
+        if not turbo_dir.exists():
+            return False
+        if self._gpu_name:
+            # PyTorch CUDA path requires safetensors weights + MOSS tokenizer cached locally
+            moss_dir = hf_hub / "models--OpenMOSS-Team--MOSS-Audio-Tokenizer-Nano"
+            has_safetensors = any(turbo_dir.rglob("*.safetensors"))
+            return has_safetensors and moss_dir.exists()
+        return True
 
     def _get_local_model(self):
         with self._lock:
             if self._tts_model is None:
                 from vieneu import Vieneu
 
-                print(f"[VieNeu-ReadAloud] Loading VieNeu-TTS v3 Turbo ({self.precision})...")
+                if self._gpu_name:
+                    print(f"[VieNeu-ReadAloud] Loading VieNeu-TTS v3 Turbo on GPU: {self._gpu_name} (CUDA)...")
+                else:
+                    print(f"[VieNeu-ReadAloud] Loading VieNeu-TTS v3 Turbo ({self.precision} ONNX/CPU)...")
                 t0 = time.time()
                 prev_offline = os.environ.get("HF_HUB_OFFLINE")
                 used_offline = False
@@ -145,11 +170,19 @@ class HybridVieNeuEngine:
                     os.environ["HF_HUB_OFFLINE"] = "1"
                     used_offline = True
                 try:
-                    self._tts_model = Vieneu(mode="v3turbo", precision=self.precision)
+                    self._tts_model = Vieneu(
+                        mode="v3turbo",
+                        precision=self.precision,
+                        device="cuda" if self._gpu_name else "auto",
+                    )
                 except Exception:
                     if used_offline:
                         os.environ.pop("HF_HUB_OFFLINE", None)
-                        self._tts_model = Vieneu(mode="v3turbo", precision=self.precision)
+                        self._tts_model = Vieneu(
+                            mode="v3turbo",
+                            precision=self.precision,
+                            device="cuda" if self._gpu_name else "auto",
+                        )
                     else:
                         raise
                 finally:
@@ -160,14 +193,15 @@ class HybridVieNeuEngine:
                             os.environ["HF_HUB_OFFLINE"] = prev_offline
 
                 self.sample_rate = getattr(self._tts_model, "sample_rate", 48000)
+                active_backend = getattr(self._tts_model, "backend", "unknown")
                 print(
-                    f"[VieNeu-ReadAloud] Loaded VieNeu-TTS in {time.time() - t0:.2f}s (sr={self.sample_rate})."
+                    f"[VieNeu-ReadAloud] Loaded VieNeu-TTS ({active_backend}) in {time.time() - t0:.2f}s (sr={self.sample_rate})."
                 )
             return self._tts_model
 
     def warm_up(self) -> None:
-        """Pre-warm local model in background only if OpenMAIC upstream server is not running."""
-        if self._is_upstream_alive():
+        """Pre-warm local model in background (prefers local CUDA over CPU proxy)."""
+        if not self._gpu_name and self._is_upstream_alive():
             print(f"[VieNeu-ReadAloud] Detected running OpenMAIC VieNeu server at {self.upstream_url} (proxy mode).")
             return
         self.is_warming_up = True
@@ -176,7 +210,7 @@ class HybridVieNeuEngine:
             tts = self._get_local_model()
             with self._lock:
                 _ = tts.infer("Hệ thống đọc tài liệu đã sẵn sàng.", voice=DEFAULT_VOICE, apply_watermark=False)
-            print("[VieNeu-ReadAloud] VieNeu-TTS warm-up complete. Ready to speak!")
+            print(f"[VieNeu-ReadAloud] VieNeu-TTS warm-up complete ({self.backend_mode}). Ready to speak!")
         except Exception as err:
             self.warmup_error = str(err)
             print(f"[VieNeu-ReadAloud] Warm-up warning: {err}")
@@ -239,8 +273,8 @@ class HybridVieNeuEngine:
         voice_key = (voice or "hai_dang").strip()
         cloned_path = self._find_cloned_voice_path(voice_key)
 
-        # Prefer OpenMAIC proxy when running and voice isn't exclusively local-cloned
-        if self._tts_model is None and self._is_upstream_alive():
+        # Prefer local CUDA over CPU proxy; otherwise proxy OpenMAIC if running
+        if not self._gpu_name and self._tts_model is None and self._is_upstream_alive():
             try:
                 with httpx.Client(timeout=60.0) as client:
                     resp = client.post(

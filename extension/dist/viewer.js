@@ -22252,7 +22252,14 @@ async function connectBackend(silent = false) {
     el.backendChip.className = "status-chip is-online";
     const groqCount = health?.ai_translators?.groq_keys || 0;
     const gemCount = health?.ai_translators?.gemini_keys || 0;
-    label.textContent = groqCount || gemCount ? "VieNeu + AI s\u1EB5n s\xE0ng" : "VieNeu s\u1EB5n s\xE0ng";
+    const isGpu = String(health?.tts_mode || "").toLowerCase().startsWith("cuda");
+    if (isGpu && (groqCount || gemCount)) {
+      label.textContent = "VieNeu GPU + AI";
+    } else if (isGpu) {
+      label.textContent = "VieNeu GPU s\u1EB5n s\xE0ng";
+    } else {
+      label.textContent = groqCount || gemCount ? "VieNeu + AI s\u1EB5n s\xE0ng" : "VieNeu s\u1EB5n s\xE0ng";
+    }
     if ((groqCount > 0 || gemCount > 0) && state.settings.provider === "google" && !state.settings.manualProviderChoice) {
       saveSettings({ provider: "smart_ai" });
       el.providerSelect.value = "smart_ai";

@@ -184,7 +184,14 @@ async function connectBackend(silent = false) {
     el.backendChip.className = 'status-chip is-online';
     const groqCount = health?.ai_translators?.groq_keys || 0;
     const gemCount = health?.ai_translators?.gemini_keys || 0;
-    label.textContent = groqCount || gemCount ? 'VieNeu + AI sẵn sàng' : 'VieNeu sẵn sàng';
+    const isGpu = String(health?.tts_mode || '').toLowerCase().startsWith('cuda');
+    if (isGpu && (groqCount || gemCount)) {
+      label.textContent = 'VieNeu GPU + AI';
+    } else if (isGpu) {
+      label.textContent = 'VieNeu GPU sẵn sàng';
+    } else {
+      label.textContent = groqCount || gemCount ? 'VieNeu + AI sẵn sàng' : 'VieNeu sẵn sàng';
+    }
     // Auto-upgrade legacy default 'google' once when AI keys are configured on backend
     if ((groqCount > 0 || gemCount > 0) && state.settings.provider === 'google' && !state.settings.manualProviderChoice) {
       saveSettings({ provider: 'smart_ai' });
