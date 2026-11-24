@@ -1,0 +1,19 @@
+{
+  "name": "vieneu-pdf-read-aloud",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Chrome/Edge extension for English-to-Vietnamese PDF Read Aloud powered by VieNeu-TTS",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "pdfjs-dist": "^4.10.38"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "vitest": "^3.0.8"
+  }
+}

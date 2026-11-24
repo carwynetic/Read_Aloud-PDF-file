@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VieNeu Read Aloud — PDF Reader Tiếng Việt</title>
+  <link rel="stylesheet" href="viewer.css" />
+</head>
+<body data-theme="light">
+  <!-- Top Floating Read Aloud Toolbar -->
+  <header class="toolbar" role="banner">
+    <div class="toolbar-group toolbar-left">
+      <div class="brand-badge" id="brandBadge" aria-label="VieNeu Read Aloud">
+        <span class="waveform" id="waveformIcon" aria-hidden="true">
+          <span class="bar b1"></span>
+          <span class="bar b2"></span>
+          <span class="bar b3"></span>
+          <span class="bar b4"></span>
+        </span>
+        <span class="brand-name">Read Aloud VI</span>
+      </div>
+
+      <span class="status-chip" id="backendChip" title="Kết nối tới máy chủ VieNeu-TTS local">
+        <span class="status-dot"></span>
+        <span class="status-label">Đang kết nối…</span>
+      </span>
+
+      <span class="doc-meta" id="pageIndicator" hidden>Trang 1 / 1</span>
+
+      <button type="button" class="pill-btn" id="skipInspectBtn" hidden aria-pressed="false" title="Hiện các vùng đã tự động bỏ qua (Header, Footer, Số trang, Hình vẽ)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94" />
+          <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19" />
+          <line x1="1" y1="1" x2="23" y2="23" />
+        </svg>
+        <span id="skipCountLabel">Đã bỏ qua 0 mục</span>
+      </button>
+    </div>
+
+    <div class="toolbar-group toolbar-center" role="group" aria-label="Điều khiển phát đọc">
+      <button type="button" class="icon-btn" id="prevBtn" disabled title="Câu trước (←)" aria-label="Câu trước">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="19 20 9 12 19 4 19 20" />
+          <line x1="5" y1="19" x2="5" y2="5" />
+        </svg>
+      </button>
+
+      <button type="button" class="play-btn" id="playPauseBtn" disabled title="Đọc / Tạm dừng (Space)" aria-label="Đọc hoặc tạm dừng">
+        <svg class="icon-play" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+          <polygon points="6 4 20 12 6 20 6 4" />
+        </svg>
+        <svg class="icon-pause" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+          <rect x="6" y="4" width="4.5" height="16" rx="1.2" />
+          <rect x="13.5" y="4" width="4.5" height="16" rx="1.2" />
+        </svg>
+        <span class="play-spinner" aria-hidden="true"></span>
+      </button>
+
+      <button type="button" class="icon-btn" id="nextBtn" disabled title="Câu tiếp theo (→)" aria-label="Câu tiếp theo">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="5 4 15 12 5 20 5 4" />
+          <line x1="19" y1="5" x2="19" y2="19" />
+        </svg>
+      </button>
+
+      <span class="toolbar-divider" aria-hidden="true"></span>
+
+      <div class="zoom-group" role="group" aria-label="Thu phóng trang">
+        <button type="button" class="icon-btn icon-btn-sm" id="zoomOutBtn" title="Thu nhỏ" aria-label="Thu nhỏ">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
+            <line x1="5" y1="12" x2="19" y2="12" />
+          </svg>
+        </button>
+        <span class="zoom-readout" id="zoomReadout">125%</span>
+        <button type="button" class="icon-btn icon-btn-sm" id="zoomInBtn" title="Phóng to" aria-label="Phóng to">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
+            <line x1="12" y1="5" x2="12" y2="19" />
+            <line x1="5" y1="12" x2="19" y2="12" />
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <div class="toolbar-group toolbar-right">
+      <button type="button" class="pill-btn" id="focusDimBtn" aria-pressed="true" title="Làm mờ vùng ngoài đoạn đang đọc (F)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 3v18" />
+          <path d="M12 8l6.5-3.5" />
+          <path d="M12 13l7.5-4" />
+          <path d="M12 18l5.5-3" />
+        </svg>
+        <span>Tập trung</span>
+      </button>
+
+      <button type="button" class="pill-btn" id="subtitleToggleBtn" aria-pressed="true" title="Hiện phụ đề tiếng Việt đồng bộ từng từ (C)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="5" width="20" height="14" rx="3" />
+          <line x1="6" y1="12" x2="11" y2="12" />
+          <line x1="14" y1="12" x2="18" y2="12" />
+          <line x1="6" y1="15.5" x2="14" y2="15.5" />
+        </svg>
+        <span>Phụ đề VI</span>
+      </button>
+
+      <button type="button" class="pill-btn" id="voiceOptionsBtn" aria-expanded="false" aria-controls="optionsPopover">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+          <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+          <line x1="12" y1="19" x2="12" y2="23" />
+          <line x1="8" y1="23" x2="16" y2="23" />
+        </svg>
+        <span>Tùy chọn giọng</span>
+      </button>
+
+      <button type="button" class="icon-btn" id="openFileBtn" title="Mở file PDF khác" aria-label="Mở file PDF khác">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+        </svg>
+      </button>
+      <input type="file" id="hiddenFileInput" accept="application/pdf,.pdf" hidden />
+    </div>
+  </header>
+
+  <!-- Voice & Filter Options Popover (position: fixed to escape overflow) -->
+  <aside class="options-popover" id="optionsPopover" role="dialog" aria-label="Tùy chọn giọng đọc và bộ lọc" hidden>
+    <div class="popover-head">
+      <h2>Tùy chọn giọng & đọc</h2>
+      <button type="button" class="icon-btn icon-btn-sm" id="closeOptionsBtn" aria-label="Đóng">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <line x1="18" y1="6" x2="6" y2="18" />
+          <line x1="6" y1="6" x2="18" y2="18" />
+        </svg>
+      </button>
+    </div>
+
+    <div class="popover-body">
+      <div class="field">
+        <label for="voiceSelect">Giọng đọc VieNeu-TTS (48kHz)</label>
+        <select id="voiceSelect" class="input-control">
+          <option value="hai_dang">Hải Đăng (Nam - Bắc)</option>
+          <option value="truc_ly">Trúc Ly (Nữ - Nam)</option>
+          <option value="mai_anh">Mai Anh (Nữ - Bắc)</option>
+          <option value="thien_minh">Thiện Minh (Nam - Nam)</option>
+          <option value="thuy_dung">Thùy Dung (Nữ)</option>
+          <option value="quang_son">Quang Sơn (Nam)</option>
+          <option value="ngoc_tran">Ngọc Trân (Nữ)</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <div class="field-row">
+          <label for="speedSlider">Tốc độ đọc</label>
+          <span class="tabular-val" id="speedValue">1.00×</span>
+        </div>
+        <input type="range" id="speedSlider" min="0.75" max="1.75" step="0.05" value="1.00" class="range-control" />
+      </div>
+
+      <div class="field">
+        <label>Mức highlight trên PDF</label>
+        <div class="segmented" role="radiogroup" aria-label="Mức độ highlight">
+          <button type="button" class="seg-btn is-active" data-hl-mode="all">Đoạn + Câu + Từ</button>
+          <button type="button" class="seg-btn" data-hl-mode="sentence-word">Câu + Từ</button>
+          <button type="button" class="seg-btn" data-hl-mode="sentence">Chỉ Câu</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Tự động bỏ qua khi đọc</label>
+        <div class="check-grid">
+          <label class="check-item"><input type="checkbox" id="optSkipHeaders" checked /> Header & Footer</label>
+          <label class="check-item"><input type="checkbox" id="optSkipPageNums" checked /> Số trang</label>
+          <label class="check-item"><input type="checkbox" id="optSkipFigures" checked /> Hình vẽ & Chú thích</label>
+          <label class="check-item"><input type="checkbox" id="optSkipFootnotes" checked /> Footnote cuối trang</label>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="providerSelect">Bộ dịch Anh → Việt</label>
+        <select id="providerSelect" class="input-control">
+          <option value="google">Google Dịch (Nhanh, miễn phí)</option>
+          <option value="openai">LLM tương thích OpenAI / Ollama</option>
+          <option value="passthrough">Không dịch (Đọc trực tiếp văn bản)</option>
+        </select>
+      </div>
+
+      <div class="llm-config" id="llmConfigGroup" hidden>
+        <input type="url" id="llmBaseUrl" class="input-control" placeholder="Base URL (vd: http://127.0.0.1:11434/v1)" />
+        <input type="text" id="llmModel" class="input-control" placeholder="Model (vd: gpt-4o-mini, qwen2.5:7b)" />
+        <input type="password" id="llmApiKey" class="input-control" placeholder="API Key (để trống nếu dùng Ollama)" />
+      </div>
+
+      <details class="clone-details">
+        <summary>Clone giọng cá nhân từ file .WAV (3–10 giây)</summary>
+        <div class="clone-box">
+          <input type="text" id="cloneNameInput" class="input-control" placeholder="Tên giọng (vd: giong_toi)" />
+          <div class="clone-row">
+            <input type="file" id="cloneFileInput" accept=".wav,audio/wav" class="file-mini" />
+            <button type="button" class="btn-mini" id="cloneUploadBtn">Tải lên</button>
+          </div>
+          <p class="clone-status" id="cloneStatus"></p>
+        </div>
+      </details>
+
+      <div class="field-inline">
+        <label for="themeToggleBtn">Giao diện dịu mắt</label>
+        <button type="button" class="pill-btn" id="themeToggleBtn">Ban ngày</button>
+      </div>
+
+      <div class="field">
+        <label for="backendUrlInput">Máy chủ VieNeu-TTS local</label>
+        <div class="url-row">
+          <input type="url" id="backendUrlInput" class="input-control" value="http://127.0.0.1:8765" />
+          <button type="button" class="btn-mini" id="reconnectBtn">Kiểm tra</button>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main Workspace -->
+  <main class="workspace" id="workspace">
+    <!-- Empty / Dropzone Welcome State -->
+    <section class="empty-stage" id="emptyStage">
+      <div class="empty-shell" id="dropZone">
+        <div class="empty-emblem" aria-hidden="true">
+          <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+            <polyline points="14 2 14 8 20 8" />
+            <line x1="8" y1="13" x2="16" y2="13" />
+            <line x1="8" y1="17" x2="13" y2="17" />
+          </svg>
+        </div>
+        <h1 class="empty-title">Đọc tài liệu PDF bằng giọng tiếng Việt VieNeu-TTS</h1>
+        <p class="empty-desc">
+          Kéo thả file PDF tiếng Anh vào đây hoặc dán liên kết trực tiếp. Hệ thống tự động bỏ qua hình vẽ, header, footer, số trang và highlight theo từng đoạn, câu, từ khi đọc.
+        </p>
+
+        <div class="empty-actions">
+          <button type="button" class="cta-primary" id="pickPdfBtn">Chọn file PDF từ máy</button>
+          <button type="button" class="cta-secondary" id="loadDemoBtn">Thử bài báo mẫu 2 cột</button>
+        </div>
+
+        <form class="url-form" id="urlLoadForm">
+          <input type="url" id="pdfUrlInput" class="url-input" placeholder="Dán link PDF (vd: https://arxiv.org/pdf/2002.05709.pdf)" />
+          <button type="submit" class="url-submit">Mở link</button>
+        </form>
+
+        <div class="shortcut-strip" aria-label="Phím tắt nhanh">
+          <span><kbd>Space</kbd> Phát / Tạm dừng</span>
+          <span><kbd>←</kbd> <kbd>→</kbd> Chuyển câu</span>
+          <span><kbd>F</kbd> Tập trung</span>
+          <span><kbd>Click</kbd> Đọc từ câu bất kỳ</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- PDF Pages Scroll Container -->
+    <div class="pdf-scroll" id="pdfScroll" hidden>
+      <div class="pages-stack" id="pagesStack"></div>
+    </div>
+  </main>
+
+  <!-- Live Vietnamese Synchronized Karaoke Caption Bar -->
+  <section class="caption-dock" id="captionDock" hidden aria-live="polite">
+    <div class="caption-inner">
+      <div class="caption-meta">
+        <span class="caption-badge" id="captionProgressBadge">Câu 1 / 1</span>
+        <span class="caption-state" id="captionStateText">Sẵn sàng</span>
+        <button type="button" class="caption-close" id="hideCaptionBtn" aria-label="Ẩn phụ đề" title="Ẩn phụ đề">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <line x1="18" y1="6" x2="6" y2="18" />
+            <line x1="6" y1="6" x2="18" y2="18" />
+          </svg>
+        </button>
+      </div>
+      <p class="caption-vi" id="captionViText">Nhấn nút Phát hoặc click vào bất kỳ câu nào trên PDF để bắt đầu nghe tiếng Việt.</p>
+      <p class="caption-en" id="captionEnText"></p>
+      <div class="caption-progress-track" aria-hidden="true">
+        <div class="caption-progress-fill" id="captionProgressFill"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Non-intrusive Toast Notification -->
+  <div class="toast" id="toast" role="status" hidden></div>
+
+  <script type="module" src="viewer.js"></script>
+</body>
+</html>

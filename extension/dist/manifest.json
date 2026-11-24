@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "VieNeu Read Aloud — Đọc PDF Tiếng Việt",
+  "short_name": "VieNeu Read Aloud",
+  "version": "1.0.0",
+  "description": "Đọc tài liệu PDF tiếng Anh dịch sang tiếng Việt bằng giọng VieNeu-TTS local, kèm highlight đoạn/câu/từ mượt mà và tự động bỏ qua hình vẽ, header, footer, số trang.",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "tabs",
+    "contextMenus"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:8765/*",
+    "http://localhost:8765/*",
+    "http://*/*",
+    "https://*/*",
+    "file://*/*"
+  ],
+  "action": {
+    "default_title": "VieNeu Read Aloud (PDF EN → VI)",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"
+  }
+}

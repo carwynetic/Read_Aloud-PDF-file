@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+backend/.cache/
+backend/cloned_voices/*.wav
+
+# Node
+extension/node_modules/
+npm-debug.log*
+
+# Environment & Secrets
+.env
+.env.local
+.env.*.local
+
+# OS & Editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
