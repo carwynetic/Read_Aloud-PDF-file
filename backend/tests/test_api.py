@@ -101,7 +101,7 @@ class TestBackendAPI(unittest.TestCase):
         self.assertEqual(resp.status_code, 400)
 
     def test_read_sentence_caches_repeat_requests(self):
-        payload = {"text": "Contrastive learning works well.", "voice": "hai_dang"}
+        payload = {"text": "Contrastive learning works well.", "voice": "hai_dang", "provider": "google"}
         r1 = self.client.post("/api/read-sentence", json=payload)
         r2 = self.client.post("/api/read-sentence", json=payload)
         self.assertEqual(r1.status_code, 200)

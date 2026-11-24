@@ -23,6 +23,16 @@ var VieNeuApiClient = class {
     if (!resp.ok) throw new Error(`Failed to fetch voices (HTTP ${resp.status})`);
     return await resp.json();
   }
+  async translate(payload, signal) {
+    const resp = await fetch(`${this.baseUrl}/api/translate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return await resp.json();
+  }
   async readSentence(payload, signal) {
     const resp = await fetch(`${this.baseUrl}/api/read-sentence`, {
       method: "POST",

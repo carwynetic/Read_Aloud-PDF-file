@@ -21845,6 +21845,18 @@ var PrefetchQueue = class {
     this._inflight.set(key, promise);
     return promise;
   }
+  has(sentenceId) {
+    return this._cache.has(sentenceId);
+  }
+  warm(sentences, index) {
+    if (!Array.isArray(sentences) || index < 0 || index >= sentences.length) return;
+    const gen = this._generation;
+    const target = sentences[index];
+    if (target && !this._cache.has(target.id) && !this._inflight.has(target.id)) {
+      this._fetchOne(target, gen).catch(() => {
+      });
+    }
+  }
   async get(sentences, index) {
     if (!Array.isArray(sentences) || index < 0 || index >= sentences.length) {
       throw new RangeError(`Sentence index ${index} out of bounds`);
@@ -21902,6 +21914,16 @@ var VieNeuApiClient = class {
     if (!resp.ok) throw new Error(`Failed to fetch voices (HTTP ${resp.status})`);
     return await resp.json();
   }
+  async translate(payload, signal) {
+    const resp = await fetch(`${this.baseUrl}/api/translate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return await resp.json();
+  }
   async readSentence(payload, signal) {
     const resp = await fetch(`${this.baseUrl}/api/read-sentence`, {
       method: "POST",
@@ -21947,7 +21969,7 @@ var DEFAULT_SETTINGS = {
   backendUrl: DEFAULT_BACKEND_URL,
   voice: "hai_dang",
   speed: 1,
-  provider: "google",
+  provider: "smart_ai",
   openaiBaseUrl: "",
   openaiModel: "",
   openaiApiKey: "",
@@ -22094,8 +22116,18 @@ async function connectBackend(silent = false) {
       return;
     }
     el.backendChip.className = "status-chip is-online";
-    label.textContent = "VieNeu s\u1EB5n s\xE0ng";
+    const groqCount = health?.ai_translators?.groq_keys || 0;
+    const gemCount = health?.ai_translators?.gemini_keys || 0;
+    label.textContent = groqCount || gemCount ? "VieNeu + AI s\u1EB5n s\xE0ng" : "VieNeu s\u1EB5n s\xE0ng";
+    if ((groqCount > 0 || gemCount > 0) && state.settings.provider === "google" && !state.settings.manualProviderChoice) {
+      saveSettings({ provider: "smart_ai" });
+      el.providerSelect.value = "smart_ai";
+      buildPrefetchQueue();
+    }
     await refreshVoices();
+    if (state.analyzed?.sentences?.length && !state.isPlaying) {
+      state.prefetchQueue?.warm(state.analyzed.sentences, state.currentSentenceIndex);
+    }
   } catch {
     el.backendChip.className = "status-chip is-offline";
     label.textContent = "Ch\u01B0a b\u1EADt server";
@@ -22146,7 +22178,7 @@ async function refreshVoices() {
 function buildPrefetchQueue() {
   if (state.prefetchQueue) state.prefetchQueue.invalidate();
   state.prefetchQueue = new PrefetchQueue({
-    lookahead: 2,
+    lookahead: 3,
     fetcher: (sentence, signal) => {
       const s = state.settings;
       return state.api.readSentence(
@@ -22313,6 +22345,9 @@ function reanalyzeLayout(resetIndex = false) {
     const active = state.analyzed.sentences[state.currentSentenceIndex];
     renderSentenceHighlights(active, null);
     updateCaptionIdle(active);
+    if (el.backendChip.classList.contains("is-online")) {
+      state.prefetchQueue?.warm(state.analyzed.sentences, state.currentSentenceIndex);
+    }
   }
 }
 var SKIP_LABELS_VI = {
@@ -22562,17 +22597,42 @@ async function playSentenceAt(index) {
   el.captionProgressBadge.textContent = `C\xE2u ${index + 1} / ${state.analyzed.sentences.length}`;
   el.captionStateText.textContent = "\u0110ang d\u1ECBch & t\u1EA1o gi\u1ECDng VieNeu-TTS\u2026";
   el.captionViText.classList.add("is-loading");
-  el.captionViText.textContent = "\u0110ang d\u1ECBch sang ti\u1EBFng Vi\u1EC7t v\xE0 t\u1ED5ng h\u1EE3p gi\u1ECDng \u0111\u1ECDc\u2026";
+  el.captionViText.textContent = "\u0110ang d\u1ECBch sang ti\u1EBFng Vi\u1EC7t chuy\xEAn ng\xE0nh\u2026";
   el.captionEnText.textContent = sentence.text;
   el.captionProgressFill.style.transform = "scaleX(0)";
+  const previewAbort = new AbortController();
+  if (!state.prefetchQueue?.has(sentence.id) && state.settings.provider !== "passthrough") {
+    const s = state.settings;
+    state.api.translate(
+      {
+        text: sentence.text,
+        provider: s.provider,
+        source_lang: "en",
+        target_lang: "vi",
+        openai_base_url: s.openaiBaseUrl || void 0,
+        openai_model: s.openaiModel || void 0,
+        openai_api_key: s.openaiApiKey || void 0
+      },
+      previewAbort.signal
+    ).then((tr) => {
+      if (state.isPlaying && state.isLoadingAudio && state.currentSentenceIndex === index && tr?.translatedText) {
+        el.captionViText.classList.remove("is-loading");
+        el.captionViText.textContent = tr.translatedText;
+        el.captionStateText.textContent = `\u0110\xE3 d\u1ECBch (${tr.provider}) \xB7 \u0110ang t\u1EA1o gi\u1ECDng VieNeu\u2026`;
+      }
+    }).catch(() => {
+    });
+  }
   try {
     const payload = await state.prefetchQueue.get(state.analyzed.sentences, index);
+    previewAbort.abort();
     if (!state.isPlaying || state.currentSentenceIndex !== index) return;
     state.activePayload = payload;
     state.isLoadingAudio = false;
     updateTransportButtons();
     renderVietnameseKaraoke(payload.wordTimings, payload.translatedText);
-    el.captionStateText.textContent = payload.cached ? `VieNeu-TTS \xB7 Cache (${payload.voice})` : `VieNeu-TTS \xB7 ${payload.latencyMs || 0}ms (${payload.voice})`;
+    const provTag = payload.provider ? ` \xB7 ${payload.provider}` : "";
+    el.captionStateText.textContent = payload.cached ? `VieNeu-TTS \xB7 Cache (${payload.voice}${provTag})` : `VieNeu-TTS \xB7 ${payload.latencyMs || 0}ms (${payload.voice}${provTag})`;
     state.activeAudioUrl = base64ToBlobUrl(payload.audioBase64, "audio/wav");
     state.audioEl.src = state.activeAudioUrl;
     state.audioEl.playbackRate = state.settings.speed;
@@ -22818,7 +22878,7 @@ function bindEvents2() {
     (cb) => cb.addEventListener("change", onFilterChange)
   );
   el.providerSelect.addEventListener("change", () => {
-    saveSettings({ provider: el.providerSelect.value });
+    saveSettings({ provider: el.providerSelect.value, manualProviderChoice: true });
     el.llmConfigGroup.hidden = el.providerSelect.value !== "openai";
     buildPrefetchQueue();
   });

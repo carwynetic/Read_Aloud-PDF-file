@@ -59,6 +59,19 @@ export class PrefetchQueue {
     return promise;
   }
 
+  has(sentenceId) {
+    return this._cache.has(sentenceId);
+  }
+
+  warm(sentences, index) {
+    if (!Array.isArray(sentences) || index < 0 || index >= sentences.length) return;
+    const gen = this._generation;
+    const target = sentences[index];
+    if (target && !this._cache.has(target.id) && !this._inflight.has(target.id)) {
+      this._fetchOne(target, gen).catch(() => {});
+    }
+  }
+
   async get(sentences, index) {
     if (!Array.isArray(sentences) || index < 0 || index >= sentences.length) {
       throw new RangeError(`Sentence index ${index} out of bounds`);

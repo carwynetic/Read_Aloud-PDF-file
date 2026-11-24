@@ -17,7 +17,7 @@ const DEFAULT_SETTINGS = {
   backendUrl: DEFAULT_BACKEND_URL,
   voice: 'hai_dang',
   speed: 1.0,
-  provider: 'google',
+  provider: 'smart_ai',
   openaiBaseUrl: '',
   openaiModel: '',
   openaiApiKey: '',
@@ -182,8 +182,20 @@ async function connectBackend(silent = false) {
       return;
     }
     el.backendChip.className = 'status-chip is-online';
-    label.textContent = 'VieNeu sẵn sàng';
+    const groqCount = health?.ai_translators?.groq_keys || 0;
+    const gemCount = health?.ai_translators?.gemini_keys || 0;
+    label.textContent = groqCount || gemCount ? 'VieNeu + AI sẵn sàng' : 'VieNeu sẵn sàng';
+    // Auto-upgrade legacy default 'google' once when AI keys are configured on backend
+    if ((groqCount > 0 || gemCount > 0) && state.settings.provider === 'google' && !state.settings.manualProviderChoice) {
+      saveSettings({ provider: 'smart_ai' });
+      el.providerSelect.value = 'smart_ai';
+      buildPrefetchQueue();
+    }
     await refreshVoices();
+    // Silently pre-warm the first sentence so Play starts immediately
+    if (state.analyzed?.sentences?.length && !state.isPlaying) {
+      state.prefetchQueue?.warm(state.analyzed.sentences, state.currentSentenceIndex);
+    }
   } catch {
     el.backendChip.className = 'status-chip is-offline';
     label.textContent = 'Chưa bật server';
@@ -256,7 +268,7 @@ async function refreshVoices() {
 function buildPrefetchQueue() {
   if (state.prefetchQueue) state.prefetchQueue.invalidate();
   state.prefetchQueue = new PrefetchQueue({
-    lookahead: 2,
+    lookahead: 3,
     fetcher: (sentence, signal) => {
       const s = state.settings;
       return state.api.readSentence(
@@ -454,6 +466,9 @@ function reanalyzeLayout(resetIndex = false) {
     const active = state.analyzed.sentences[state.currentSentenceIndex];
     renderSentenceHighlights(active, null);
     updateCaptionIdle(active);
+    if (el.backendChip.classList.contains('is-online')) {
+      state.prefetchQueue?.warm(state.analyzed.sentences, state.currentSentenceIndex);
+    }
   }
 }
 
@@ -764,12 +779,40 @@ async function playSentenceAt(index) {
   el.captionProgressBadge.textContent = `Câu ${index + 1} / ${state.analyzed.sentences.length}`;
   el.captionStateText.textContent = 'Đang dịch & tạo giọng VieNeu-TTS…';
   el.captionViText.classList.add('is-loading');
-  el.captionViText.textContent = 'Đang dịch sang tiếng Việt và tổng hợp giọng đọc…';
+  el.captionViText.textContent = 'Đang dịch sang tiếng Việt chuyên ngành…';
   el.captionEnText.textContent = sentence.text;
   el.captionProgressFill.style.transform = 'scaleX(0)';
 
+  // Fast Vietnamese subtitle preview (~400ms via Groq/Gemini) while VieNeu-TTS synthesizes audio
+  const previewAbort = new AbortController();
+  if (!state.prefetchQueue?.has(sentence.id) && state.settings.provider !== 'passthrough') {
+    const s = state.settings;
+    state.api
+      .translate(
+        {
+          text: sentence.text,
+          provider: s.provider,
+          source_lang: 'en',
+          target_lang: 'vi',
+          openai_base_url: s.openaiBaseUrl || undefined,
+          openai_model: s.openaiModel || undefined,
+          openai_api_key: s.openaiApiKey || undefined,
+        },
+        previewAbort.signal
+      )
+      .then((tr) => {
+        if (state.isPlaying && state.isLoadingAudio && state.currentSentenceIndex === index && tr?.translatedText) {
+          el.captionViText.classList.remove('is-loading');
+          el.captionViText.textContent = tr.translatedText;
+          el.captionStateText.textContent = `Đã dịch (${tr.provider}) · Đang tạo giọng VieNeu…`;
+        }
+      })
+      .catch(() => {});
+  }
+
   try {
     const payload = await state.prefetchQueue.get(state.analyzed.sentences, index);
+    previewAbort.abort();
     if (!state.isPlaying || state.currentSentenceIndex !== index) return;
 
     state.activePayload = payload;
@@ -777,9 +820,10 @@ async function playSentenceAt(index) {
     updateTransportButtons();
 
     renderVietnameseKaraoke(payload.wordTimings, payload.translatedText);
+    const provTag = payload.provider ? ` · ${payload.provider}` : '';
     el.captionStateText.textContent = payload.cached
-      ? `VieNeu-TTS · Cache (${payload.voice})`
-      : `VieNeu-TTS · ${payload.latencyMs || 0}ms (${payload.voice})`;
+      ? `VieNeu-TTS · Cache (${payload.voice}${provTag})`
+      : `VieNeu-TTS · ${payload.latencyMs || 0}ms (${payload.voice}${provTag})`;
 
     state.activeAudioUrl = base64ToBlobUrl(payload.audioBase64, 'audio/wav');
     state.audioEl.src = state.activeAudioUrl;
@@ -1058,7 +1102,7 @@ function bindEvents() {
 
   // Translation provider
   el.providerSelect.addEventListener('change', () => {
-    saveSettings({ provider: el.providerSelect.value });
+    saveSettings({ provider: el.providerSelect.value, manualProviderChoice: true });
     el.llmConfigGroup.hidden = el.providerSelect.value !== 'openai';
     buildPrefetchQueue();
   });

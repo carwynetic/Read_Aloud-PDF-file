@@ -20,13 +20,21 @@ from pydantic import BaseModel, Field
 
 from backend.alignment import compute_word_timings
 from backend.cache import DiskLRUCache
-from backend.translator import GoogleFetcher, TranslationConfig, translate_text
+from backend.translator import (
+    GoogleFetcher,
+    TranslationConfig,
+    get_key_pools,
+    load_local_env,
+    translate_text,
+)
 from backend.tts_engine import HybridVieNeuEngine
+
+load_local_env()
 
 
 class TranslateRequest(BaseModel):
     text: str
-    provider: str = "google"
+    provider: str = "smart_ai"
     source_lang: str = "en"
     target_lang: str = "vi"
     openai_base_url: Optional[str] = None
@@ -38,7 +46,7 @@ class ReadSentenceRequest(BaseModel):
     text: str = Field(..., description="Original PDF sentence text")
     voice: str = Field(default="hai_dang", description="Preset or cloned voice ID")
     translate: bool = Field(default=True, description="Whether to translate EN -> VI")
-    provider: str = Field(default="google", description="google | openai | passthrough")
+    provider: str = Field(default="smart_ai", description="smart_ai | groq | gemini | google | openai | passthrough")
     source_lang: str = Field(default="en")
     target_lang: str = Field(default="vi")
     openai_base_url: Optional[str] = None
@@ -82,12 +90,17 @@ def create_app(
     @app.get("/health")
     def health():
         warming = bool(getattr(engine, "is_warming_up", False))
+        groq_pool, gemini_pool = get_key_pools()
         return {
             "status": "warming_up" if warming else "healthy",
             "ready": not warming,
             "service": "vieneu-read-aloud",
             "tts_mode": getattr(engine, "backend_mode", "unknown"),
             "sample_rate": getattr(engine, "sample_rate", 48000),
+            "ai_translators": {
+                "groq_keys": len(groq_pool),
+                "gemini_keys": len(gemini_pool),
+            },
             "warmup_error": getattr(engine, "warmup_error", None),
         }
 
@@ -165,12 +178,34 @@ def create_app(
                 "latencyMs": int(round((time.perf_counter() - t0) * 1000)),
             }
 
-        try:
-            tr = translate_text(raw, config=cfg, google_fetcher=google_fetcher)
-        except Exception as err:
-            raise HTTPException(status_code=502, detail=f"Translation failed: {err}")
+        # Check translation-only cache first so parallel /api/translate preview is reused cleanly
+        t_key = cache.make_key("tr", raw, cfg.provider, cfg.source_lang, cfg.target_lang, cfg.openai_model or "")
+        cached_tr = cache.get_json(t_key)
+        if cached_tr and cached_tr.get("translatedText"):
+            cleaned_src = cached_tr.get("cleanedSourceText", raw)
+            spoken_text = cached_tr["translatedText"].strip()
+            was_translated = bool(cached_tr.get("wasTranslated", True))
+            used_provider = cached_tr.get("provider", cfg.provider)
+        else:
+            try:
+                tr = translate_text(raw, config=cfg, google_fetcher=google_fetcher)
+            except Exception as err:
+                raise HTTPException(status_code=502, detail=f"Translation failed: {err}")
+            cleaned_src = tr.cleaned_source_text
+            spoken_text = tr.translated_text.strip()
+            was_translated = tr.was_translated
+            used_provider = tr.provider
+            cache.set_json(
+                t_key,
+                {
+                    "sourceText": tr.source_text,
+                    "cleanedSourceText": cleaned_src,
+                    "translatedText": spoken_text,
+                    "wasTranslated": was_translated,
+                    "provider": used_provider,
+                },
+            )
 
-        spoken_text = tr.translated_text.strip()
         if not spoken_text:
             raise HTTPException(status_code=400, detail="Nothing speakable after cleaning text.")
 
@@ -188,10 +223,10 @@ def create_app(
 
         meta = {
             "sourceText": raw,
-            "cleanedSourceText": tr.cleaned_source_text,
+            "cleanedSourceText": cleaned_src,
             "translatedText": spoken_text,
-            "wasTranslated": tr.was_translated,
-            "provider": tr.provider,
+            "wasTranslated": was_translated,
+            "provider": used_provider,
             "voice": req.voice,
             "sampleRate": sr,
             "durationMs": duration_ms,

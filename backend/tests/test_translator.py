@@ -1,6 +1,12 @@
 import unittest
 
-from backend.translator import clean_text_for_tts, translate_text, TranslationConfig
+from backend.translator import (
+    KeyPool,
+    TranslationConfig,
+    clean_llm_output_for_tts,
+    clean_text_for_tts,
+    translate_text,
+)
 
 
 class TestTranslator(unittest.TestCase):
@@ -44,6 +50,46 @@ class TestTranslator(unittest.TestCase):
         self.assertTrue(result.was_translated)
         self.assertEqual(called["src"], "en")
         self.assertEqual(called["tgt"], "vi")
+
+    def test_key_pool_rotates_and_skips_cooled_down_keys(self):
+        pool = KeyPool.from_csv("k1, k2 , k3")
+        self.assertEqual(pool.next_key(), "k1")
+        self.assertEqual(pool.next_key(), "k2")
+        pool.mark_failed("k3", cooldown_s=60)
+        self.assertEqual(pool.next_key(), "k1")
+
+    def test_clean_llm_output_strips_markdown_and_normalizes_for_tts(self):
+        raw = '  "Mô hình **SimCLR** cải thiện `batch size` và *epoch* nhanh hơn 100× đạt 76.5%."  '
+        cleaned = clean_llm_output_for_tts(raw)
+        self.assertNotIn("**", cleaned)
+        self.assertNotIn("`", cleaned)
+        self.assertNotIn("*", cleaned)
+        self.assertIn("batch size", cleaned)
+        self.assertIn("epoch", cleaned)
+        self.assertIn("100 lần", cleaned)
+        self.assertIn("76,5 phần trăm", cleaned)
+
+    def test_smart_ai_fails_over_from_groq_to_gemini_to_google(self):
+        calls = []
+
+        def fail_groq(text, cfg):
+            calls.append("groq")
+            raise RuntimeError("429 rate limit")
+
+        def ok_gemini(text, cfg):
+            calls.append("gemini")
+            return "Học **contrastive learning** cần batch size lớn hơn."
+
+        res = translate_text(
+            "Contrastive learning needs a larger batch size.",
+            config=TranslationConfig(provider="smart_ai"),
+            groq_fetcher=fail_groq,
+            gemini_fetcher=ok_gemini,
+        )
+        self.assertEqual(calls, ["groq", "gemini"])
+        self.assertEqual(res.provider, "gemini")
+        self.assertEqual(res.translated_text, "Học contrastive learning cần batch size lớn hơn.")
+        self.assertNotIn("**", res.translated_text)
 
 
 if __name__ == "__main__":
