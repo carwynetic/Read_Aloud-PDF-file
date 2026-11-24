@@ -78,6 +78,8 @@ class HybridVieNeuEngine:
         self._lock = threading.Lock()
         self._upstream_ok_until: float = 0.0
         self._backend_mode = "auto"
+        self.is_warming_up: bool = False
+        self.warmup_error: Optional[str] = None
 
         local_cloned = Path(__file__).parent / "cloned_voices"
         local_cloned.mkdir(parents=True, exist_ok=True)
@@ -125,6 +127,11 @@ class HybridVieNeuEngine:
                     return candidate
         return None
 
+    @staticmethod
+    def _has_local_hf_cache() -> bool:
+        hf_hub = Path.home() / ".cache" / "huggingface" / "hub"
+        return (hf_hub / "models--pnnbao-ump--VieNeu-TTS-v3-Turbo").exists()
+
     def _get_local_model(self):
         with self._lock:
             if self._tts_model is None:
@@ -132,7 +139,26 @@ class HybridVieNeuEngine:
 
                 print(f"[VieNeu-ReadAloud] Loading VieNeu-TTS v3 Turbo ({self.precision})...")
                 t0 = time.time()
-                self._tts_model = Vieneu(mode="v3turbo", precision=self.precision)
+                prev_offline = os.environ.get("HF_HUB_OFFLINE")
+                used_offline = False
+                if prev_offline is None and self._has_local_hf_cache():
+                    os.environ["HF_HUB_OFFLINE"] = "1"
+                    used_offline = True
+                try:
+                    self._tts_model = Vieneu(mode="v3turbo", precision=self.precision)
+                except Exception:
+                    if used_offline:
+                        os.environ.pop("HF_HUB_OFFLINE", None)
+                        self._tts_model = Vieneu(mode="v3turbo", precision=self.precision)
+                    else:
+                        raise
+                finally:
+                    if used_offline:
+                        if prev_offline is None:
+                            os.environ.pop("HF_HUB_OFFLINE", None)
+                        else:
+                            os.environ["HF_HUB_OFFLINE"] = prev_offline
+
                 self.sample_rate = getattr(self._tts_model, "sample_rate", 48000)
                 print(
                     f"[VieNeu-ReadAloud] Loaded VieNeu-TTS in {time.time() - t0:.2f}s (sr={self.sample_rate})."
@@ -140,13 +166,22 @@ class HybridVieNeuEngine:
             return self._tts_model
 
     def warm_up(self) -> None:
-        """Pre-warm local model only if OpenMAIC upstream server is not running."""
+        """Pre-warm local model in background only if OpenMAIC upstream server is not running."""
         if self._is_upstream_alive():
             print(f"[VieNeu-ReadAloud] Detected running OpenMAIC VieNeu server at {self.upstream_url} (proxy mode).")
             return
-        tts = self._get_local_model()
-        with self._lock:
-            _ = tts.infer("Hệ thống đọc tài liệu đã sẵn sàng.", voice=DEFAULT_VOICE, apply_watermark=False)
+        self.is_warming_up = True
+        self.warmup_error = None
+        try:
+            tts = self._get_local_model()
+            with self._lock:
+                _ = tts.infer("Hệ thống đọc tài liệu đã sẵn sàng.", voice=DEFAULT_VOICE, apply_watermark=False)
+            print("[VieNeu-ReadAloud] VieNeu-TTS warm-up complete. Ready to speak!")
+        except Exception as err:
+            self.warmup_error = str(err)
+            print(f"[VieNeu-ReadAloud] Warm-up warning: {err}")
+        finally:
+            self.is_warming_up = False
 
     def list_voices(self) -> Dict[str, List[Dict[str, str]]]:
         presets: List[Dict[str, str]] = []

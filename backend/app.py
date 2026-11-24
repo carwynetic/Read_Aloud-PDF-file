@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import base64
+from contextlib import asynccontextmanager
 import io
 import os
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -56,7 +58,18 @@ def create_app(
     google_fetcher: Optional[GoogleFetcher] = None,
     warm_up_on_start: bool = False,
 ) -> FastAPI:
-    app = FastAPI(title="VieNeu Read Aloud Backend", version="1.0.0")
+    engine = tts_engine or HybridVieNeuEngine()
+    default_cache_dir = cache_dir or (Path(__file__).parent / ".cache")
+    cache = DiskLRUCache(default_cache_dir, max_items=400)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        if warm_up_on_start and hasattr(engine, "warm_up"):
+            engine.is_warming_up = True
+            threading.Thread(target=engine.warm_up, name="vieneu-warmup", daemon=True).start()
+        yield
+
+    app = FastAPI(title="VieNeu Read Aloud Backend", version="1.0.0", lifespan=lifespan)
 
     app.add_middleware(
         CORSMiddleware,
@@ -66,22 +79,16 @@ def create_app(
         allow_headers=["*"],
     )
 
-    engine = tts_engine or HybridVieNeuEngine()
-    default_cache_dir = cache_dir or (Path(__file__).parent / ".cache")
-    cache = DiskLRUCache(default_cache_dir, max_items=400)
-
-    if warm_up_on_start and hasattr(engine, "warm_up"):
-        @app.on_event("startup")
-        def _startup() -> None:
-            engine.warm_up()
-
     @app.get("/health")
     def health():
+        warming = bool(getattr(engine, "is_warming_up", False))
         return {
-            "status": "healthy",
+            "status": "warming_up" if warming else "healthy",
+            "ready": not warming,
             "service": "vieneu-read-aloud",
             "tts_mode": getattr(engine, "backend_mode", "unknown"),
             "sample_rate": getattr(engine, "sample_rate", 48000),
+            "warmup_error": getattr(engine, "warmup_error", None),
         }
 
     @app.get("/api/voices")

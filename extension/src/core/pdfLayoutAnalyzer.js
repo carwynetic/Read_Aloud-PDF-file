@@ -99,17 +99,26 @@ function intersectionRatio(itemRect, figBox) {
  * Group raw text items into visual lines (items sharing a baseline within column).
  */
 function buildVisualLines(items, pageWidth, pageHeight) {
-  const valid = items
-    .filter((it) => it && typeof it.str === 'string' && it.str.trim().length > 0)
-    .map((it) => ({
+  const rotatedItems = [];
+  const valid = [];
+  for (const it of items) {
+    if (!it || typeof it.str !== 'string' || !it.str.trim()) continue;
+    const normalized = {
       str: it.str.replace(/\s+/g, ' ').trim(),
       x: Number(it.x) || 0,
       y: Number(it.y) || 0,
       width: Math.max(1, Number(it.width) || 1),
       height: Math.max(4, Number(it.height) || 10),
-    }));
+      rotated: Boolean(it.rotated),
+    };
+    if (normalized.rotated) {
+      rotatedItems.push(normalized);
+    } else {
+      valid.push(normalized);
+    }
+  }
 
-  if (!valid.length) return [];
+  if (!valid.length) return { lines: [], isTwoColumn: false, rotatedItems };
 
   // Sort primarily by y, secondarily by x
   valid.sort((a, b) => (Math.abs(a.y - b.y) <= 3 ? a.x - b.x : a.y - b.y));
@@ -179,7 +188,7 @@ function buildVisualLines(items, pageWidth, pageHeight) {
     line.fontSize = median(line.items.map((it) => it.height));
   }
 
-  return { lines, isTwoColumn };
+  return { lines, isTwoColumn, rotatedItems };
 }
 
 /**
@@ -370,13 +379,18 @@ export function analyzeDocumentPages(pages, options = {}) {
   } = options;
 
   const pageSummaries = pages.map((p) => {
-    const { lines, isTwoColumn } = buildVisualLines(p.items || [], p.width || 600, p.height || 800);
+    const { lines, isTwoColumn, rotatedItems } = buildVisualLines(
+      p.items || [],
+      p.width || 600,
+      p.height || 800
+    );
     return {
       pageNumber: p.pageNumber,
       width: p.width || 600,
       height: p.height || 800,
       figureBoxes: p.figureBoxes || [],
       lines: lines || [],
+      rotatedItems: rotatedItems || [],
       isTwoColumn: Boolean(isTwoColumn),
     };
   });
@@ -414,6 +428,24 @@ export function analyzeDocumentPages(pages, options = {}) {
   let sentenceSeq = 0;
 
   for (const ps of pageSummaries) {
+    // Record skipped rotated margin watermarks (e.g. vertical arXiv stamps)
+    if (skipHeadersFooters && ps.rotatedItems.length > 0) {
+      for (const rot of ps.rotatedItems) {
+        skippedRegions.push({
+          id: `skip-${ps.pageNumber}-${skippedRegions.length}`,
+          pageNumber: ps.pageNumber,
+          reason: 'watermark',
+          text: rot.str,
+          rect: {
+            x: clamp01(rot.x / ps.width),
+            y: clamp01(rot.y / ps.height),
+            width: clamp01(rot.width / ps.width),
+            height: clamp01(rot.height / ps.height),
+          },
+        });
+      }
+    }
+
     const ordered = sortLinesInReadingOrder(ps.lines, ps.isTwoColumn);
     const bodyLines = [];
     let activeCaptionCol = null;

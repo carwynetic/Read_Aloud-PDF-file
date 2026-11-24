@@ -21275,14 +21275,25 @@ function intersectionRatio(itemRect, figBox) {
   return inter / area;
 }
 function buildVisualLines(items, pageWidth, pageHeight) {
-  const valid = items.filter((it) => it && typeof it.str === "string" && it.str.trim().length > 0).map((it) => ({
-    str: it.str.replace(/\s+/g, " ").trim(),
-    x: Number(it.x) || 0,
-    y: Number(it.y) || 0,
-    width: Math.max(1, Number(it.width) || 1),
-    height: Math.max(4, Number(it.height) || 10)
-  }));
-  if (!valid.length) return [];
+  const rotatedItems = [];
+  const valid = [];
+  for (const it of items) {
+    if (!it || typeof it.str !== "string" || !it.str.trim()) continue;
+    const normalized = {
+      str: it.str.replace(/\s+/g, " ").trim(),
+      x: Number(it.x) || 0,
+      y: Number(it.y) || 0,
+      width: Math.max(1, Number(it.width) || 1),
+      height: Math.max(4, Number(it.height) || 10),
+      rotated: Boolean(it.rotated)
+    };
+    if (normalized.rotated) {
+      rotatedItems.push(normalized);
+    } else {
+      valid.push(normalized);
+    }
+  }
+  if (!valid.length) return { lines: [], isTwoColumn: false, rotatedItems };
   valid.sort((a, b) => Math.abs(a.y - b.y) <= 3 ? a.x - b.x : a.y - b.y);
   const midX = pageWidth * 0.5;
   const leftCount = valid.filter((it) => it.x + it.width < midX + pageWidth * 0.02).length;
@@ -21335,7 +21346,7 @@ function buildVisualLines(items, pageWidth, pageHeight) {
     line.text = line.items.map((it) => it.str).join(" ").replace(/\s+/g, " ").trim();
     line.fontSize = median(line.items.map((it) => it.height));
   }
-  return { lines, isTwoColumn };
+  return { lines, isTwoColumn, rotatedItems };
 }
 function lineToWordBoxes(line, pageNumber) {
   const words = [];
@@ -21464,13 +21475,18 @@ function analyzeDocumentPages(pages, options = {}) {
     skipFootnotes = true
   } = options;
   const pageSummaries = pages.map((p) => {
-    const { lines, isTwoColumn } = buildVisualLines(p.items || [], p.width || 600, p.height || 800);
+    const { lines, isTwoColumn, rotatedItems } = buildVisualLines(
+      p.items || [],
+      p.width || 600,
+      p.height || 800
+    );
     return {
       pageNumber: p.pageNumber,
       width: p.width || 600,
       height: p.height || 800,
       figureBoxes: p.figureBoxes || [],
       lines: lines || [],
+      rotatedItems: rotatedItems || [],
       isTwoColumn: Boolean(isTwoColumn)
     };
   });
@@ -21502,6 +21518,22 @@ function analyzeDocumentPages(pages, options = {}) {
   let paragraphSeq = 0;
   let sentenceSeq = 0;
   for (const ps of pageSummaries) {
+    if (skipHeadersFooters && ps.rotatedItems.length > 0) {
+      for (const rot of ps.rotatedItems) {
+        skippedRegions.push({
+          id: `skip-${ps.pageNumber}-${skippedRegions.length}`,
+          pageNumber: ps.pageNumber,
+          reason: "watermark",
+          text: rot.str,
+          rect: {
+            x: clamp01(rot.x / ps.width),
+            y: clamp01(rot.y / ps.height),
+            width: clamp01(rot.width / ps.width),
+            height: clamp01(rot.height / ps.height)
+          }
+        });
+      }
+    }
     const ordered = sortLinesInReadingOrder(ps.lines, ps.isTwoColumn);
     const bodyLines = [];
     let activeCaptionCol = null;
@@ -22038,19 +22070,36 @@ function showToast(message, durationMs = 3200) {
     el.toast.hidden = true;
   }, durationMs);
 }
-async function connectBackend() {
+var healthPollTimer = null;
+function scheduleBackendPoll(delayMs = 2500) {
+  clearTimeout(healthPollTimer);
+  healthPollTimer = setTimeout(() => {
+    connectBackend(true);
+  }, delayMs);
+}
+async function connectBackend(silent = false) {
+  clearTimeout(healthPollTimer);
   state.api.setBaseUrl(state.settings.backendUrl);
   const label = el.backendChip.querySelector(".status-label");
-  el.backendChip.className = "status-chip";
-  label.textContent = "\u0110ang k\u1EBFt n\u1ED1i\u2026";
+  if (!silent) {
+    el.backendChip.className = "status-chip";
+    label.textContent = "\u0110ang k\u1EBFt n\u1ED1i\u2026";
+  }
   try {
     const health = await state.api.checkHealth();
+    if (health?.status === "warming_up" || health?.ready === false) {
+      el.backendChip.className = "status-chip";
+      label.textContent = "\u0110ang n\u1EA1p VieNeu\u2026";
+      scheduleBackendPoll(2e3);
+      return;
+    }
     el.backendChip.className = "status-chip is-online";
-    label.textContent = health?.status === "healthy" ? "VieNeu s\u1EB5n s\xE0ng" : "\u0110\xE3 k\u1EBFt n\u1ED1i";
+    label.textContent = "VieNeu s\u1EB5n s\xE0ng";
     await refreshVoices();
   } catch {
     el.backendChip.className = "status-chip is-offline";
     label.textContent = "Ch\u01B0a b\u1EADt server";
+    scheduleBackendPoll(2500);
   }
 }
 async function refreshVoices() {
@@ -22219,11 +22268,19 @@ async function renderAllPagesAndAnalyze() {
     for (const raw of textContent.items) {
       if (!raw || typeof raw.str !== "string" || !raw.str.trim()) continue;
       const tx = __webpack_exports__Util.transform(viewport.transform, raw.transform);
+      const isRotated = Math.abs(tx[1]) > Math.abs(tx[0]) * 0.55;
       const fontHeight = Math.hypot(tx[2], tx[3]) || Math.abs(tx[0]) || 11;
       const width = Math.max(1, (raw.width || 0) * viewport.scale);
-      const x = tx[4];
-      const y = tx[5] - fontHeight * 0.86;
-      items.push({ str: raw.str, x, y, width, height: fontHeight * 1.05 });
+      const x = isRotated ? Math.max(0, tx[4] - fontHeight) : tx[4];
+      const y = isRotated ? Math.max(0, tx[5] - width) : tx[5] - fontHeight * 0.86;
+      items.push({
+        str: raw.str,
+        x,
+        y,
+        width: isRotated ? fontHeight * 1.1 : width,
+        height: isRotated ? Math.max(fontHeight, width) : fontHeight * 1.05,
+        rotated: isRotated
+      });
     }
     const figureBoxes = await extractFigureBoxesFromPdfPage(page, viewport, __webpack_exports__OPS);
     state.rawPages.push({
@@ -22264,7 +22321,8 @@ var SKIP_LABELS_VI = {
   "page-number": "S\u1ED1 trang",
   figure: "H\xECnh v\u1EBD",
   caption: "Ch\xFA th\xEDch",
-  footnote: "Footnote"
+  footnote: "Footnote",
+  watermark: "Watermark"
 };
 function renderInteractiveAndSkipLayers() {
   for (const pv of state.pageViews.values()) {

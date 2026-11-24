@@ -58,7 +58,16 @@ class TestBackendAPI(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
         self.assertEqual(data["status"], "healthy")
+        self.assertTrue(data["ready"])
         self.assertEqual(data["tts_mode"], "fake-test")
+
+    def test_health_endpoint_reports_warming_up_while_engine_loading(self):
+        self.engine.is_warming_up = True
+        resp = self.client.get("/health")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["status"], "warming_up")
+        self.assertFalse(data["ready"])
 
     def test_voices_endpoint_returns_preset_and_cloned_lists(self):
         resp = self.client.get("/api/voices")

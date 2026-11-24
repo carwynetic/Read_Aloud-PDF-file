@@ -49,9 +49,15 @@ async function init() {
   const api = new VieNeuApiClient(stored.backendUrl);
   try {
     const health = await api.checkHealth();
-    serverStatusEl.className = 'status-pill status-online';
-    statusTextEl.textContent = health?.status === 'healthy' ? 'VieNeu sẵn sàng' : 'Đã kết nối';
-    offlineHintEl.hidden = true;
+    if (health?.status === 'warming_up' || health?.ready === false) {
+      serverStatusEl.className = 'status-pill status-checking';
+      statusTextEl.textContent = 'Đang nạp VieNeu…';
+      offlineHintEl.hidden = true;
+    } else {
+      serverStatusEl.className = 'status-pill status-online';
+      statusTextEl.textContent = 'VieNeu sẵn sàng';
+      offlineHintEl.hidden = true;
+    }
   } catch {
     serverStatusEl.className = 'status-pill status-offline';
     statusTextEl.textContent = 'Chưa bật server';

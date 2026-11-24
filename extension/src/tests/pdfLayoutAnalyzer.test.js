@@ -130,6 +130,27 @@ describe('pdfLayoutAnalyzer', () => {
     ]);
   });
 
+  it('skips vertical rotated margin watermarks like arXiv stamps', () => {
+    const pages = [
+      {
+        pageNumber: 1,
+        width: 600,
+        height: 800,
+        figureBoxes: [],
+        items: [
+          { str: 'arXiv:2002.05709v3 [cs.LG] 1 Jul 2020', x: 18, y: 360, width: 14, height: 220, rotated: true },
+          item('This paper presents SimCLR for visual representations.', 90, 260, 220, 11),
+        ],
+      },
+    ];
+
+    const doc = analyzeDocumentPages(pages);
+    expect(doc.sentences.map((s) => s.text)).toEqual([
+      'This paper presents SimCLR for visual representations.',
+    ]);
+    expect(doc.skippedRegions.map((r) => r.reason)).toContain('watermark');
+  });
+
   it('produces normalized paragraph, sentence, and per-word bounding boxes and handles abbreviations', () => {
     const pages = [
       {

@@ -153,22 +153,41 @@ function showToast(message, durationMs = 3200) {
 }
 
 // ============================================================================
-// Backend Connection & Voices
+// Backend Connection & Voices (with automatic reconnect / warm-up polling)
 // ============================================================================
-async function connectBackend() {
+let healthPollTimer = null;
+
+function scheduleBackendPoll(delayMs = 2500) {
+  clearTimeout(healthPollTimer);
+  healthPollTimer = setTimeout(() => {
+    connectBackend(true);
+  }, delayMs);
+}
+
+async function connectBackend(silent = false) {
+  clearTimeout(healthPollTimer);
   state.api.setBaseUrl(state.settings.backendUrl);
   const label = el.backendChip.querySelector('.status-label');
-  el.backendChip.className = 'status-chip';
-  label.textContent = 'Đang kết nối…';
+  if (!silent) {
+    el.backendChip.className = 'status-chip';
+    label.textContent = 'Đang kết nối…';
+  }
 
   try {
     const health = await state.api.checkHealth();
+    if (health?.status === 'warming_up' || health?.ready === false) {
+      el.backendChip.className = 'status-chip';
+      label.textContent = 'Đang nạp VieNeu…';
+      scheduleBackendPoll(2000);
+      return;
+    }
     el.backendChip.className = 'status-chip is-online';
-    label.textContent = health?.status === 'healthy' ? 'VieNeu sẵn sàng' : 'Đã kết nối';
+    label.textContent = 'VieNeu sẵn sàng';
     await refreshVoices();
   } catch {
     el.backendChip.className = 'status-chip is-offline';
     label.textContent = 'Chưa bật server';
+    scheduleBackendPoll(2500);
   }
 }
 
@@ -378,17 +397,25 @@ async function renderAllPagesAndAnalyze() {
       wordCursor,
     });
 
-    // Extract text items in top-down viewport coordinates
+    // Extract text items in top-down viewport coordinates (flagging rotated margin stamps)
     const textContent = await page.getTextContent();
     const items = [];
     for (const raw of textContent.items) {
       if (!raw || typeof raw.str !== 'string' || !raw.str.trim()) continue;
       const tx = pdfjsLib.Util.transform(viewport.transform, raw.transform);
+      const isRotated = Math.abs(tx[1]) > Math.abs(tx[0]) * 0.55;
       const fontHeight = Math.hypot(tx[2], tx[3]) || Math.abs(tx[0]) || 11;
       const width = Math.max(1, (raw.width || 0) * viewport.scale);
-      const x = tx[4];
-      const y = tx[5] - fontHeight * 0.86;
-      items.push({ str: raw.str, x, y, width, height: fontHeight * 1.05 });
+      const x = isRotated ? Math.max(0, tx[4] - fontHeight) : tx[4];
+      const y = isRotated ? Math.max(0, tx[5] - width) : tx[5] - fontHeight * 0.86;
+      items.push({
+        str: raw.str,
+        x,
+        y,
+        width: isRotated ? fontHeight * 1.1 : width,
+        height: isRotated ? Math.max(fontHeight, width) : fontHeight * 1.05,
+        rotated: isRotated,
+      });
     }
 
     const figureBoxes = await extractFigureBoxesFromPdfPage(page, viewport, pdfjsLib.OPS);
@@ -437,6 +464,7 @@ const SKIP_LABELS_VI = {
   figure: 'Hình vẽ',
   caption: 'Chú thích',
   footnote: 'Footnote',
+  watermark: 'Watermark',
 };
 
 function renderInteractiveAndSkipLayers() {
