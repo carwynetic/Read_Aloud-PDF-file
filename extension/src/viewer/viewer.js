@@ -28,6 +28,7 @@ const DEFAULT_SETTINGS = {
   skipHeadersFooters: true,
   skipPageNumbers: true,
   skipFigures: true,
+  skipCaptions: false,
   skipFootnotes: true,
   theme: 'light',
 };
@@ -111,6 +112,7 @@ const el = {
   optSkipHeaders: document.getElementById('optSkipHeaders'),
   optSkipPageNums: document.getElementById('optSkipPageNums'),
   optSkipFigures: document.getElementById('optSkipFigures'),
+  optSkipCaptions: document.getElementById('optSkipCaptions'),
   optSkipFootnotes: document.getElementById('optSkipFootnotes'),
   providerSelect: document.getElementById('providerSelect'),
   llmConfigGroup: document.getElementById('llmConfigGroup'),
@@ -492,6 +494,7 @@ function reanalyzeLayout(resetIndex = false) {
     skipHeadersFooters: s.skipHeadersFooters,
     skipPageNumbers: s.skipPageNumbers,
     skipFigures: s.skipFigures,
+    skipCaptions: s.skipCaptions,
     skipFootnotes: s.skipFootnotes,
   });
 
@@ -1032,6 +1035,7 @@ function applySettingsToUi() {
   el.optSkipHeaders.checked = s.skipHeadersFooters;
   el.optSkipPageNums.checked = s.skipPageNumbers;
   el.optSkipFigures.checked = s.skipFigures;
+  el.optSkipCaptions.checked = s.skipCaptions;
   el.optSkipFootnotes.checked = s.skipFootnotes;
   el.focusDimBtn.setAttribute('aria-pressed', String(s.focusDim));
   el.subtitleToggleBtn.setAttribute('aria-pressed', String(s.showSubtitle));
@@ -1136,11 +1140,12 @@ function bindEvents() {
       skipHeadersFooters: el.optSkipHeaders.checked,
       skipPageNumbers: el.optSkipPageNums.checked,
       skipFigures: el.optSkipFigures.checked,
+      skipCaptions: el.optSkipCaptions.checked,
       skipFootnotes: el.optSkipFootnotes.checked,
     });
     reanalyzeLayout(false);
   };
-  [el.optSkipHeaders, el.optSkipPageNums, el.optSkipFigures, el.optSkipFootnotes].forEach((cb) =>
+  [el.optSkipHeaders, el.optSkipPageNums, el.optSkipFigures, el.optSkipCaptions, el.optSkipFootnotes].forEach((cb) =>
     cb.addEventListener('change', onFilterChange)
   );
 

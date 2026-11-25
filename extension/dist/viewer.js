@@ -21206,8 +21206,8 @@ var __webpack_exports__version = __webpack_exports__.version;
 
 // src/core/pdfLayoutAnalyzer.js
 var PAGE_NUMBER_RE = /^(?:[-–—•·]?\s*)?(?:page\s*)?(?:\d{1,4}|[ivxlcdm]{1,6})(?:\s*(?:of|\/)\s*\d{1,4})?(?:\s*[-–—•·])?$/i;
-var CAPTION_START_RE = /^(?:figure|fig\.?|table|tbl\.?|algorithm|alg\.?|scheme|chart|plate)\s*\d+[a-z]?(?:\s*[:.\-–—]|\s+[A-Z])/i;
-var FIGURE_CAPTION_START_RE = /^(?:figure|fig\.?|scheme|chart|plate)\s*\d+[a-z]?(?:\s*[:.\-–—]|\s+[A-Z])/i;
+var CAPTION_START_RE = /^(?:Figure|Fig\.?|Table|Tbl\.?|Algorithm|Alg\.?|Scheme|Chart|Plate)\s*\d+[a-z]?\s*(?:[:.\-–—](?:\s|$)|\s+[A-Z])/;
+var FIGURE_CAPTION_START_RE = /^(?:Figure|Fig\.?|Scheme|Chart|Plate)\s*\d+[a-z]?\s*(?:[:.\-–—](?:\s|$)|\s+[A-Z])/;
 var EMAIL_RE = /<?[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}>?/i;
 var FOOTER_METADATA_RE = /(?:proceedings\s+of\s+the|copyright\s+(?:©|\(c\))?\s*\d{4}|all\s+rights\s+reserved|correspondence\s+to\s*:|code\s+available\s+at|preprint\.?\s*under\s+review|published\s+as\s+a\s+conference\s+paper|arxiv:\d{4}\.\d{4,5}|https?:\/\/|github\.com\/|\bpmlr\s+\d+|\bthe\s+author\(s\)|equal\s+contribution|[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})/i;
 var FOOTNOTE_PREFIX_RE = /^(?:[\d*†‡§¶]{1,2}\s*[A-Z][a-z]+|<?[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}>?)/i;
@@ -21496,6 +21496,7 @@ function analyzeDocumentPages(pages, options = {}) {
     skipHeadersFooters = true,
     skipPageNumbers = true,
     skipFigures = true,
+    skipCaptions = false,
     skipFootnotes = true
   } = options;
   const pageSummaries = pages.map((p) => {
@@ -21570,15 +21571,28 @@ function analyzeDocumentPages(pages, options = {}) {
     }
     const ordered = sortLinesInReadingOrder(ps.lines, ps.isTwoColumn);
     const skipReasonByIdx = new Array(ordered.length).fill(null);
-    if (skipFigures) {
+    const captionLineIndices = /* @__PURE__ */ new Set();
+    if (skipFigures || skipCaptions) {
       let activeCapCol = null;
       let activeCapBottomY = -1;
       let activeCapFontSize = bodyFontSize;
       const figureCaptionIndices = [];
+      const prevLineWrappedMidSentence = (idx, col) => {
+        for (let k = idx - 1; k >= 0; k--) {
+          if (ordered[k].col !== col) continue;
+          const prev = ordered[k];
+          const prevText = prev.text.trim();
+          const gapY = ordered[idx].y - (prev.y + prev.height);
+          const prevWords = prevText.split(/\s+/).filter(Boolean).length;
+          return gapY < ordered[idx].height * 1.65 && prevWords >= 6 && prev.fontSize >= bodyFontSize * 0.9 && /[a-z,]$/.test(prevText);
+        }
+        return false;
+      };
       for (let i = 0; i < ordered.length; i++) {
         const line = ordered[i];
-        if (CAPTION_START_RE.test(line.text)) {
-          skipReasonByIdx[i] = "caption";
+        if (CAPTION_START_RE.test(line.text) && !prevLineWrappedMidSentence(i, line.col)) {
+          captionLineIndices.add(i);
+          if (skipCaptions) skipReasonByIdx[i] = "caption";
           activeCapCol = line.col;
           activeCapBottomY = line.y + line.height;
           activeCapFontSize = line.fontSize;
@@ -21588,28 +21602,31 @@ function analyzeDocumentPages(pages, options = {}) {
           continue;
         }
         if (activeCapCol === line.col && line.y - activeCapBottomY <= Math.max(line.height * 0.95, activeCapFontSize * 0.95) && line.fontSize <= Math.max(activeCapFontSize * 1.06, bodyFontSize * 0.98)) {
-          skipReasonByIdx[i] = "caption";
+          captionLineIndices.add(i);
+          if (skipCaptions) skipReasonByIdx[i] = "caption";
           activeCapBottomY = line.y + line.height;
           continue;
         }
         activeCapCol = null;
       }
-      for (const capIdx of figureCaptionIndices) {
-        const capLine = ordered[capIdx];
-        const capX1 = capLine.x - 28;
-        const capX2 = capLine.x + capLine.width + 28;
-        let prevY = capLine.y;
-        for (let j = capIdx - 1; j >= 0; j--) {
-          const cand = ordered[j];
-          if (cand.col !== capLine.col && capLine.col !== "full") break;
-          const candX2 = cand.x + cand.width;
-          if (candX2 < capX1 || cand.x > capX2) continue;
-          if (isProseBodyLine(cand, ps)) break;
-          if (cand.fontSize > bodyFontSize * 1.18) break;
-          if (/^(?:\d+(?:\.\d+)*\s+[A-Z]|abstract|introduction)\b/i.test(cand.text)) break;
-          if (prevY - (cand.y + cand.height) > ps.height * 0.22) break;
-          skipReasonByIdx[j] = "figure";
-          prevY = cand.y;
+      if (skipFigures) {
+        for (const capIdx of figureCaptionIndices) {
+          const capLine = ordered[capIdx];
+          const capX1 = capLine.x - 28;
+          const capX2 = capLine.x + capLine.width + 28;
+          let prevY = capLine.y;
+          for (let j = capIdx - 1; j >= 0; j--) {
+            const cand = ordered[j];
+            if (cand.col !== capLine.col && capLine.col !== "full") break;
+            const candX2 = cand.x + cand.width;
+            if (candX2 < capX1 || cand.x > capX2) continue;
+            if (captionLineIndices.has(j) || isProseBodyLine(cand, ps)) break;
+            if (cand.fontSize > bodyFontSize * 1.18) break;
+            if (/^(?:\d+(?:\.\d+)*\s+[A-Z]|abstract|introduction)\b/i.test(cand.text)) break;
+            if (prevY - (cand.y + cand.height) > ps.height * 0.22) break;
+            skipReasonByIdx[j] = "figure";
+            prevY = cand.y;
+          }
         }
       }
     }
@@ -21660,7 +21677,7 @@ function analyzeDocumentPages(pages, options = {}) {
         recordSkip("footnote");
         continue;
       }
-      if (skipFigures && ps.figureBoxes.length > 0) {
+      if (skipFigures && ps.figureBoxes.length > 0 && !(!skipCaptions && captionLineIndices.has(i))) {
         const insideFigure = ps.figureBoxes.some(
           (fig) => intersectionRatio(line, fig) >= 0.35 || rectsOverlap(line, fig, 2)
         );
@@ -21830,8 +21847,8 @@ async function extractFigureBoxesFromPdfPage(pdfPage, viewport, OPS2) {
       if (!box) return;
       const { width, height } = box;
       if (width * height > pageArea * 0.72) return;
-      if (height < 6 && width > viewport.width * 0.14) return;
-      if (width < 6 && height > viewport.height * 0.55) return;
+      if (height < 4.5 && width > viewport.width * 0.08) return;
+      if (width < 4.5 && height > viewport.height * 0.45) return;
       if (width < 3 && height < 3) return;
       vectorPrims.push(box);
     };
@@ -21924,13 +21941,13 @@ async function extractFigureBoxesFromPdfPage(pdfPage, viewport, OPS2) {
   } catch {
     return imageBoxes;
   }
-  const vectorClusters = clusterBoxes(vectorPrims, 24).filter((b) => b.width >= 55 && b.height >= 45 && b.width * b.height < pageArea * 0.72).map((b) => ({
-    x: Math.max(0, b.x - 14),
-    y: Math.max(0, b.y - 16),
-    width: Math.min(viewport.width, b.width + 28),
-    height: Math.min(viewport.height, b.height + 34)
+  const vectorClusters = clusterBoxes(vectorPrims, 10).filter((b) => b.width >= 55 && b.height >= 45 && b.width * b.height < pageArea * 0.72).map((b) => ({
+    x: Math.max(0, b.x - 8),
+    y: Math.max(0, b.y - 8),
+    width: Math.min(viewport.width, b.width + 16),
+    height: Math.min(viewport.height, b.height + 16)
   }));
-  return clusterBoxes([...imageBoxes, ...vectorClusters], 12);
+  return clusterBoxes([...imageBoxes, ...vectorClusters], 8);
 }
 
 // src/core/wordSyncEngine.js
@@ -22309,6 +22326,7 @@ var DEFAULT_SETTINGS = {
   skipHeadersFooters: true,
   skipPageNumbers: true,
   skipFigures: true,
+  skipCaptions: false,
   skipFootnotes: true,
   theme: "light"
 };
@@ -22381,6 +22399,7 @@ var el = {
   optSkipHeaders: document.getElementById("optSkipHeaders"),
   optSkipPageNums: document.getElementById("optSkipPageNums"),
   optSkipFigures: document.getElementById("optSkipFigures"),
+  optSkipCaptions: document.getElementById("optSkipCaptions"),
   optSkipFootnotes: document.getElementById("optSkipFootnotes"),
   providerSelect: document.getElementById("providerSelect"),
   llmConfigGroup: document.getElementById("llmConfigGroup"),
@@ -22699,6 +22718,7 @@ function reanalyzeLayout(resetIndex = false) {
     skipHeadersFooters: s.skipHeadersFooters,
     skipPageNumbers: s.skipPageNumbers,
     skipFigures: s.skipFigures,
+    skipCaptions: s.skipCaptions,
     skipFootnotes: s.skipFootnotes
   });
   if (resetIndex || state.currentSentenceIndex >= state.analyzed.sentences.length) {
@@ -23153,6 +23173,7 @@ function applySettingsToUi() {
   el.optSkipHeaders.checked = s.skipHeadersFooters;
   el.optSkipPageNums.checked = s.skipPageNumbers;
   el.optSkipFigures.checked = s.skipFigures;
+  el.optSkipCaptions.checked = s.skipCaptions;
   el.optSkipFootnotes.checked = s.skipFootnotes;
   el.focusDimBtn.setAttribute("aria-pressed", String(s.focusDim));
   el.subtitleToggleBtn.setAttribute("aria-pressed", String(s.showSubtitle));
@@ -23241,11 +23262,12 @@ function bindEvents2() {
       skipHeadersFooters: el.optSkipHeaders.checked,
       skipPageNumbers: el.optSkipPageNums.checked,
       skipFigures: el.optSkipFigures.checked,
+      skipCaptions: el.optSkipCaptions.checked,
       skipFootnotes: el.optSkipFootnotes.checked
     });
     reanalyzeLayout(false);
   };
-  [el.optSkipHeaders, el.optSkipPageNums, el.optSkipFigures, el.optSkipFootnotes].forEach(
+  [el.optSkipHeaders, el.optSkipPageNums, el.optSkipFigures, el.optSkipCaptions, el.optSkipFootnotes].forEach(
     (cb) => cb.addEventListener("change", onFilterChange)
   );
   el.providerSelect.addEventListener("change", () => {

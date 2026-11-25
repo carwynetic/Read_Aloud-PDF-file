@@ -62,7 +62,7 @@ describe('pdfLayoutAnalyzer', () => {
     expect(skipReasons).toContain('footer');
   });
 
-  it('skips text inside figure graphic boxes and Figure/Table captions', () => {
+  it('skips text inside figure graphic boxes while reading Figure/Table captions by default (skipCaptions: false)', () => {
     const pages = [
       {
         pageNumber: 1,
@@ -87,17 +87,22 @@ describe('pdfLayoutAnalyzer', () => {
       },
     ];
 
-    const doc = analyzeDocumentPages(pages);
-    const spokenTexts = doc.sentences.map((s) => s.text);
+    const docDefault = analyzeDocumentPages(pages);
+    expect(docDefault.sentences.map((s) => s.text)).toEqual([
+      'Composition of data augmentations is crucial.',
+      'Figure 1: A simple framework for contrastive learning of visual representations.',
+      'In order to understand what enables good representations, we study each component.',
+    ]);
+    expect(docDefault.skippedRegions.map((r) => r.reason)).toContain('figure');
+    expect(docDefault.skippedRegions.map((r) => r.reason)).not.toContain('caption');
 
-    expect(spokenTexts).toEqual([
+    // When user explicitly enables skipCaptions: true, captions are skipped too
+    const docSkipCap = analyzeDocumentPages(pages, { skipCaptions: true });
+    expect(docSkipCap.sentences.map((s) => s.text)).toEqual([
       'Composition of data augmentations is crucial.',
       'In order to understand what enables good representations, we study each component.',
     ]);
-
-    const skippedReasons = doc.skippedRegions.map((r) => r.reason);
-    expect(skippedReasons).toContain('figure');
-    expect(skippedReasons).toContain('caption');
+    expect(docSkipCap.skippedRegions.map((r) => r.reason)).toContain('caption');
   });
 
   it('reads two-column academic layout in left-column-first then right-column order', () => {
@@ -248,13 +253,48 @@ describe('pdfLayoutAnalyzer', () => {
       },
     ];
 
-    const doc = analyzeDocumentPages(pages);
+    const doc = analyzeDocumentPages(pages, { skipCaptions: true });
     expect(doc.sentences.map((s) => s.text)).toEqual([
       'This paper presents SimCLR for visual representations.',
       'It simplifies contrastive self-supervised learning algorithms.',
       'We evaluate linear classifiers on ImageNet.',
       'However, pixel-level generation is computationally expensive.',
     ]);
+
+    // With default skipCaptions: false, chart labels are STILL skipped while Figure 1 caption IS read
+    const docWithCaption = analyzeDocumentPages(pages);
+    expect(docWithCaption.sentences.map((s) => s.text)).toEqual([
+      'This paper presents SimCLR for visual representations.',
+      'It simplifies contrastive self-supervised learning algorithms.',
+      'We evaluate linear classifiers on ImageNet.',
+      'Figure 1.',
+      'ImageNet Top-1 accuracy of linear classifiers trained on representations learned with different methods.',
+      'However, pixel-level generation is computationally expensive.',
+    ]);
+  });
+
+  it('does not misclassify body prose starting with "Figure 9 shows..." or wrapped "...as shown in\\nFigure 3." as a caption', () => {
+    const pages = [
+      {
+        pageNumber: 1,
+        width: 600,
+        height: 800,
+        figureBoxes: [],
+        items: [
+          item('This creates a family of predictive tasks, as shown in', 55, 420, 230, 10.5),
+          item('Figure 3. This simple design decouples the task.', 55, 434, 220, 10.5),
+          item('Figure 9 shows the impact of batch size on training.', 55, 470, 225, 10.5),
+        ],
+      },
+    ];
+
+    const doc = analyzeDocumentPages(pages, { skipCaptions: true });
+    expect(doc.sentences.map((s) => s.text)).toEqual([
+      'This creates a family of predictive tasks, as shown in Figure 3.',
+      'This simple design decouples the task.',
+      'Figure 9 shows the impact of batch size on training.',
+    ]);
+    expect(doc.skippedRegions.filter((r) => r.reason === 'caption').length).toBe(0);
   });
 
   it('does not misclassify a large Page 1 title as a running header when Page 2 repeats it in smaller font', () => {

@@ -11,10 +11,10 @@ const PAGE_NUMBER_RE =
   /^(?:[-–—•·]?\s*)?(?:page\s*)?(?:\d{1,4}|[ivxlcdm]{1,6})(?:\s*(?:of|\/)\s*\d{1,4})?(?:\s*[-–—•·])?$/i;
 
 const CAPTION_START_RE =
-  /^(?:figure|fig\.?|table|tbl\.?|algorithm|alg\.?|scheme|chart|plate)\s*\d+[a-z]?(?:\s*[:.\-–—]|\s+[A-Z])/i;
+  /^(?:Figure|Fig\.?|Table|Tbl\.?|Algorithm|Alg\.?|Scheme|Chart|Plate)\s*\d+[a-z]?\s*(?:[:.\-–—](?:\s|$)|\s+[A-Z])/;
 
 const FIGURE_CAPTION_START_RE =
-  /^(?:figure|fig\.?|scheme|chart|plate)\s*\d+[a-z]?(?:\s*[:.\-–—]|\s+[A-Z])/i;
+  /^(?:Figure|Fig\.?|Scheme|Chart|Plate)\s*\d+[a-z]?\s*(?:[:.\-–—](?:\s|$)|\s+[A-Z])/;
 
 const EMAIL_RE = /<?[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}>?/i;
 
@@ -413,6 +413,7 @@ export function analyzeDocumentPages(pages, options = {}) {
     skipHeadersFooters = true,
     skipPageNumbers = true,
     skipFigures = true,
+    skipCaptions = false,
     skipFootnotes = true,
   } = options;
 
@@ -512,18 +513,38 @@ export function analyzeDocumentPages(pages, options = {}) {
 
     const ordered = sortLinesInReadingOrder(ps.lines, ps.isTwoColumn);
     const skipReasonByIdx = new Array(ordered.length).fill(null);
+    const captionLineIndices = new Set();
 
-    // Pre-pass A: Mark Figure/Table captions & upward non-prose figure/chart zones above Figure captions
-    if (skipFigures) {
+    // Pre-pass A: Identify true Figure/Table captions & upward chart/diagram zones above Figure captions
+    if (skipFigures || skipCaptions) {
       let activeCapCol = null;
       let activeCapBottomY = -1;
       let activeCapFontSize = bodyFontSize;
       const figureCaptionIndices = [];
 
+      const prevLineWrappedMidSentence = (idx, col) => {
+        for (let k = idx - 1; k >= 0; k--) {
+          if (ordered[k].col !== col) continue;
+          const prev = ordered[k];
+          const prevText = prev.text.trim();
+          const gapY = ordered[idx].y - (prev.y + prev.height);
+          const prevWords = prevText.split(/\s+/).filter(Boolean).length;
+          // Only treat as wrapped mid-sentence prose if previous line is a multi-word body line ending without terminal punctuation
+          return (
+            gapY < ordered[idx].height * 1.65 &&
+            prevWords >= 6 &&
+            prev.fontSize >= bodyFontSize * 0.90 &&
+            /[a-z,]$/.test(prevText)
+          );
+        }
+        return false;
+      };
+
       for (let i = 0; i < ordered.length; i++) {
         const line = ordered[i];
-        if (CAPTION_START_RE.test(line.text)) {
-          skipReasonByIdx[i] = 'caption';
+        if (CAPTION_START_RE.test(line.text) && !prevLineWrappedMidSentence(i, line.col)) {
+          captionLineIndices.add(i);
+          if (skipCaptions) skipReasonByIdx[i] = 'caption';
           activeCapCol = line.col;
           activeCapBottomY = line.y + line.height;
           activeCapFontSize = line.fontSize;
@@ -537,7 +558,8 @@ export function analyzeDocumentPages(pages, options = {}) {
           line.y - activeCapBottomY <= Math.max(line.height * 0.95, activeCapFontSize * 0.95) &&
           line.fontSize <= Math.max(activeCapFontSize * 1.06, bodyFontSize * 0.98)
         ) {
-          skipReasonByIdx[i] = 'caption';
+          captionLineIndices.add(i);
+          if (skipCaptions) skipReasonByIdx[i] = 'caption';
           activeCapBottomY = line.y + line.height;
           continue;
         }
@@ -545,26 +567,28 @@ export function analyzeDocumentPages(pages, options = {}) {
       }
 
       // Walk upward from each Figure N caption in the same horizontal band to skip chart/diagram labels above it
-      for (const capIdx of figureCaptionIndices) {
-        const capLine = ordered[capIdx];
-        const capX1 = capLine.x - 28;
-        const capX2 = capLine.x + capLine.width + 28;
-        let prevY = capLine.y;
-        for (let j = capIdx - 1; j >= 0; j--) {
-          const cand = ordered[j];
-          if (cand.col !== capLine.col && capLine.col !== 'full') break;
-          // Must horizontally overlap the caption's column/figure span (never cross into another column)
-          const candX2 = cand.x + cand.width;
-          if (candX2 < capX1 || cand.x > capX2) continue;
-          // Stop if this is real body prose
-          if (isProseBodyLine(cand, ps)) break;
-          // Do not consume large Page 1 title or section headings above the figure
-          if (cand.fontSize > bodyFontSize * 1.18) break;
-          if (/^(?:\d+(?:\.\d+)*\s+[A-Z]|abstract|introduction)\b/i.test(cand.text)) break;
-          // Stop if far above the chart block
-          if (prevY - (cand.y + cand.height) > ps.height * 0.22) break;
-          skipReasonByIdx[j] = 'figure';
-          prevY = cand.y;
+      if (skipFigures) {
+        for (const capIdx of figureCaptionIndices) {
+          const capLine = ordered[capIdx];
+          const capX1 = capLine.x - 28;
+          const capX2 = capLine.x + capLine.width + 28;
+          let prevY = capLine.y;
+          for (let j = capIdx - 1; j >= 0; j--) {
+            const cand = ordered[j];
+            if (cand.col !== capLine.col && capLine.col !== 'full') break;
+            // Must horizontally overlap the caption's column/figure span (never cross into another column)
+            const candX2 = cand.x + cand.width;
+            if (candX2 < capX1 || cand.x > capX2) continue;
+            // Stop if this is real body prose or another caption
+            if (captionLineIndices.has(j) || isProseBodyLine(cand, ps)) break;
+            // Do not consume large Page 1 title or section headings above the figure
+            if (cand.fontSize > bodyFontSize * 1.18) break;
+            if (/^(?:\d+(?:\.\d+)*\s+[A-Z]|abstract|introduction)\b/i.test(cand.text)) break;
+            // Stop if far above the chart block
+            if (prevY - (cand.y + cand.height) > ps.height * 0.22) break;
+            skipReasonByIdx[j] = 'figure';
+            prevY = cand.y;
+          }
         }
       }
     }
@@ -657,7 +681,8 @@ export function analyzeDocumentPages(pages, options = {}) {
       }
 
       // 5. Text inside raster or vector figure / diagram graphic bounding boxes
-      if (skipFigures && ps.figureBoxes.length > 0) {
+      // (Preserve caption lines when user wants captions read)
+      if (skipFigures && ps.figureBoxes.length > 0 && !( !skipCaptions && captionLineIndices.has(i) )) {
         const insideFigure = ps.figureBoxes.some(
           (fig) => intersectionRatio(line, fig) >= 0.35 || rectsOverlap(line, fig, 2)
         );
@@ -865,10 +890,10 @@ export async function extractFigureBoxesFromPdfPage(pdfPage, viewport, OPS) {
       const { width, height } = box;
       // Ignore full-page frames/clipping rectangles
       if (width * height > pageArea * 0.72) return;
-      // Ignore thin horizontal divider rules (header/footer/footnote rules)
-      if (height < 6 && width > viewport.width * 0.14) return;
+      // Ignore thin horizontal divider rules (header/footer/footnote/table rules)
+      if (height < 4.5 && width > viewport.width * 0.08) return;
       // Ignore thin vertical column rules
-      if (width < 6 && height > viewport.height * 0.55) return;
+      if (width < 4.5 && height > viewport.height * 0.45) return;
       // Ignore microscopic dots/text underlines
       if (width < 3 && height < 3) return;
       vectorPrims.push(box);
@@ -977,15 +1002,15 @@ export async function extractFigureBoxesFromPdfPage(pdfPage, viewport, OPS) {
     return imageBoxes;
   }
 
-  // Cluster vector graphic primitives into figure/chart regions (padded gently for axis/node labels)
-  const vectorClusters = clusterBoxes(vectorPrims, 24)
+  // Cluster vector graphic primitives into figure/chart regions (tight gap prevents merging across text paragraphs)
+  const vectorClusters = clusterBoxes(vectorPrims, 10)
     .filter((b) => b.width >= 55 && b.height >= 45 && b.width * b.height < pageArea * 0.72)
     .map((b) => ({
-      x: Math.max(0, b.x - 14),
-      y: Math.max(0, b.y - 16),
-      width: Math.min(viewport.width, b.width + 28),
-      height: Math.min(viewport.height, b.height + 34),
+      x: Math.max(0, b.x - 8),
+      y: Math.max(0, b.y - 8),
+      width: Math.min(viewport.width, b.width + 16),
+      height: Math.min(viewport.height, b.height + 16),
     }));
 
-  return clusterBoxes([...imageBoxes, ...vectorClusters], 12);
+  return clusterBoxes([...imageBoxes, ...vectorClusters], 8);
 }
