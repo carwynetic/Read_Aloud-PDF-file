@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { analyzeDocumentPages } from '../core/pdfLayoutAnalyzer.js';
+import {
+  analyzeDocumentPages,
+  extractFigureBoxesFromPdfPage,
+} from '../core/pdfLayoutAnalyzer.js';
 
 /**
  * Helper to create a synthetic PDF.js text item in top-down viewport coordinates
@@ -183,5 +186,154 @@ describe('pdfLayoutAnalyzer', () => {
       expect(w.width).toBeGreaterThan(0);
       expect(w.height).toBeGreaterThan(0);
     }
+  });
+
+  it('skips angle-bracketed footer emails and continuation lines like "the author(s)."', () => {
+    const pages = [
+      {
+        pageNumber: 1,
+        width: 600,
+        height: 800,
+        figureBoxes: [],
+        items: [
+          item('Learning effective visual representations is important.', 55, 420, 230, 11),
+          // Footnote & conference footer block at bottom of left column
+          item('1Google Research, Brain Team. Correspondence to: Ting Chen', 55, 650, 230, 8.2),
+          item('<iamtingchen@google.com>.', 55, 661, 120, 8.2),
+          item('Proceedings of the 37th International Conference on Machine', 55, 678, 230, 8.2),
+          item('Learning, Vienna, Austria, PMLR 119, 2020. Copyright 2020 by', 55, 689, 230, 8.2),
+          item('the author(s).', 55, 700, 62, 8.2),
+          item('1Code available at https://github.com/google-research/simclr.', 55, 714, 225, 8.2),
+        ],
+      },
+    ];
+
+    const doc = analyzeDocumentPages(pages);
+    expect(doc.sentences.map((s) => s.text)).toEqual([
+      'Learning effective visual representations is important.',
+    ]);
+    expect(doc.skippedRegions.length).toBe(6);
+  });
+
+  it('skips kerning-split Figure captions and chart labels sitting above a Figure caption', () => {
+    const pages = [
+      {
+        pageNumber: 1,
+        width: 600,
+        height: 800,
+        figureBoxes: [],
+        items: [
+          // Left column body
+          item('This paper presents SimCLR for visual representations.', 55, 220, 225, 10.5),
+          item('It simplifies contrastive self-supervised learning algorithms.', 55, 236, 225, 10.5),
+          item('We evaluate linear classifiers on ImageNet.', 55, 252, 215, 10.5),
+          // Right column scatter plot labels ABOVE Figure 1 caption (even without image XObject)
+          item('Supervised', 330, 190, 48, 8.5),
+          item('SimCLR (4x)', 465, 190, 58, 8.5),
+          item('SimCLR (2x)', 410, 208, 56, 8.5),
+          item('70', 318, 226, 12, 8),
+          item('SimCLR', 345, 228, 38, 8.5),
+          item('CPCv2-L', 452, 226, 40, 8),
+          item('65', 318, 248, 12, 8),
+          item('BigBiGAN', 405, 265, 44, 8),
+          item('25 50 100 200 400 626', 330, 305, 185, 8),
+          item('Number of Parameters (Millions)', 365, 318, 130, 8.5),
+          // Kerning-split "F" + "igure 1." caption right below plot
+          item('F', 315, 342, 6, 9),
+          item('igure 1. ImageNet Top-1 accuracy of linear classifiers trained', 321, 342, 220, 9),
+          item('on representations learned with different methods.', 315, 354, 210, 9),
+          // Real body paragraph below caption
+          item('However, pixel-level generation is computationally expensive.', 315, 392, 225, 10.5),
+        ],
+      },
+    ];
+
+    const doc = analyzeDocumentPages(pages);
+    expect(doc.sentences.map((s) => s.text)).toEqual([
+      'This paper presents SimCLR for visual representations.',
+      'It simplifies contrastive self-supervised learning algorithms.',
+      'We evaluate linear classifiers on ImageNet.',
+      'However, pixel-level generation is computationally expensive.',
+    ]);
+  });
+
+  it('does not misclassify a large Page 1 title as a running header when Page 2 repeats it in smaller font', () => {
+    const pages = [
+      {
+        pageNumber: 1,
+        width: 600,
+        height: 800,
+        figureBoxes: [],
+        items: [
+          item('A Simple Framework for Contrastive Learning', 90, 74, 420, 16),
+          item('This paper presents SimCLR.', 55, 200, 220, 10.5),
+        ],
+      },
+      {
+        pageNumber: 2,
+        width: 600,
+        height: 800,
+        figureBoxes: [],
+        items: [
+          item('A Simple Framework for Contrastive Learning', 160, 42, 280, 9),
+          item('Composition of data augmentations is crucial.', 55, 140, 220, 10.5),
+        ],
+      },
+    ];
+
+    const doc = analyzeDocumentPages(pages);
+    expect(doc.sentences[0].text).toBe('A Simple Framework for Contrastive Learning');
+    expect(doc.sentences.map((s) => s.text)).toContain('Composition of data augmentations is crucial.');
+    // Page 2 running header IS skipped
+    expect(doc.skippedRegions.some((r) => r.pageNumber === 2 && r.reason === 'header')).toBe(true);
+    // Page 1 large title is NOT skipped
+    expect(doc.skippedRegions.some((r) => r.pageNumber === 1 && r.reason === 'header')).toBe(false);
+  });
+
+  it('extractFigureBoxesFromPdfPage detects vector chart/diagram clusters while ignoring thin horizontal rules', async () => {
+    const OPS = {
+      save: 10,
+      restore: 11,
+      transform: 12,
+      moveTo: 13,
+      lineTo: 14,
+      curveTo: 15,
+      rectangle: 19,
+      constructPath: 91,
+      paintImageXObject: 85,
+      paintInlineImageXObject: 86,
+      paintImageMaskXObject: 83,
+    };
+
+    const fakePage = {
+      async getOperatorList() {
+        return {
+          fnArray: [
+            // Thin horizontal header divider rule across page (should be IGNORED!)
+            OPS.constructPath,
+            // Vector scatter plot axes + dashed lines in right column (x: 320..520, y: 500..650 in PDF coords)
+            OPS.constructPath,
+            OPS.constructPath,
+          ],
+          argsArray: [
+            [[OPS.moveTo, OPS.lineTo], [55, 740, 545, 740]],
+            [[OPS.moveTo, OPS.lineTo, OPS.lineTo], [320, 650, 320, 500, 520, 500]],
+            [[OPS.rectangle], [350, 540, 120, 80]],
+          ],
+        };
+      },
+    };
+
+    const viewport = {
+      width: 600,
+      height: 800,
+      convertToViewportPoint: (x, y) => [x, 800 - y],
+    };
+
+    const boxes = await extractFigureBoxesFromPdfPage(fakePage, viewport, OPS);
+    expect(boxes.length).toBe(1);
+    expect(boxes[0].x).toBeLessThanOrEqual(320);
+    expect(boxes[0].width).toBeGreaterThanOrEqual(190);
+    expect(boxes[0].height).toBeGreaterThanOrEqual(140);
   });
 });

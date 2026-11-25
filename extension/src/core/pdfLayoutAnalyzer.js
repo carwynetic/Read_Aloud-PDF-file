@@ -13,10 +13,28 @@ const PAGE_NUMBER_RE =
 const CAPTION_START_RE =
   /^(?:figure|fig\.?|table|tbl\.?|algorithm|alg\.?|scheme|chart|plate)\s*\d+[a-z]?(?:\s*[:.\-–—]|\s+[A-Z])/i;
 
-const FOOTER_METADATA_RE =
-  /(?:proceedings\s+of\s+the|copyright\s+(?:©|\(c\))?\s*\d{4}|all\s+rights\s+reserved|correspondence\s+to\s*:|code\s+available\s+at|preprint\.?\s*under\s+review|published\s+as\s+a\s+conference\s+paper|arxiv:\d{4}\.\d{4,5}|https?:\/\/github\.com\/)/i;
+const FIGURE_CAPTION_START_RE =
+  /^(?:figure|fig\.?|scheme|chart|plate)\s*\d+[a-z]?(?:\s*[:.\-–—]|\s+[A-Z])/i;
 
-const FOOTNOTE_PREFIX_RE = /^(?:[\d*†‡§¶]{1,2}\s*[A-Z][a-z]+|[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})/i;
+const EMAIL_RE = /<?[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}>?/i;
+
+const FOOTER_METADATA_RE =
+  /(?:proceedings\s+of\s+the|copyright\s+(?:©|\(c\))?\s*\d{4}|all\s+rights\s+reserved|correspondence\s+to\s*:|code\s+available\s+at|preprint\.?\s*under\s+review|published\s+as\s+a\s+conference\s+paper|arxiv:\d{4}\.\d{4,5}|https?:\/\/|github\.com\/|\bpmlr\s+\d+|\bthe\s+author\(s\)|equal\s+contribution|[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})/i;
+
+const FOOTNOTE_PREFIX_RE = /^(?:[\d*†‡§¶]{1,2}\s*[A-Z][a-z]+|<?[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}>?)/i;
+
+function normalizePdfString(raw) {
+  return String(raw || '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/\u00ad/g, '')
+    .replace(/\ufb00/g, 'ff')
+    .replace(/\ufb01/g, 'fi')
+    .replace(/\ufb02/g, 'fl')
+    .replace(/\ufb03/g, 'ffi')
+    .replace(/\ufb04/g, 'ffl')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
 const ABBREVIATIONS = new Set([
   'e.g.',
@@ -102,9 +120,11 @@ function buildVisualLines(items, pageWidth, pageHeight) {
   const rotatedItems = [];
   const valid = [];
   for (const it of items) {
-    if (!it || typeof it.str !== 'string' || !it.str.trim()) continue;
+    if (!it || typeof it.str !== 'string') continue;
+    const cleanStr = normalizePdfString(it.str);
+    if (!cleanStr) continue;
     const normalized = {
-      str: it.str.replace(/\s+/g, ' ').trim(),
+      str: cleanStr,
       x: Number(it.x) || 0,
       y: Number(it.y) || 0,
       width: Math.max(1, Number(it.width) || 1),
@@ -184,6 +204,24 @@ function buildVisualLines(items, pageWidth, pageHeight) {
 
   for (const line of lines) {
     line.items.sort((a, b) => a.x - b.x);
+    // Merge kerning-split adjacent PDF.js items (gap <= ~0.14 * fontHeight) without bogus spaces
+    const mergedItems = [];
+    for (const it of line.items) {
+      const prev = mergedItems[mergedItems.length - 1];
+      if (prev) {
+        const gap = it.x - (prev.x + prev.width);
+        const kernThreshold = Math.max(1.2, Math.min(prev.height, it.height) * 0.14);
+        if (gap <= kernThreshold) {
+          prev.str = prev.str + it.str;
+          prev.width = Math.max(prev.x + prev.width, it.x + it.width) - prev.x;
+          prev.y = Math.min(prev.y, it.y);
+          prev.height = Math.max(prev.height, it.height);
+          continue;
+        }
+      }
+      mergedItems.push({ ...it });
+    }
+    line.items = mergedItems;
     line.text = line.items.map((it) => it.str).join(' ').replace(/\s+/g, ' ').trim();
     line.fontSize = median(line.items.map((it) => it.height));
   }
@@ -395,11 +433,18 @@ export function analyzeDocumentPages(pages, options = {}) {
     };
   });
 
-  // Estimate dominant body font size across document
-  const allFontSizes = pageSummaries.flatMap((ps) => ps.lines.map((l) => l.fontSize));
+  // Estimate dominant body font size from substantial lines (>= 25 chars)
+  // so dozens of tiny chart/diagram labels cannot skew the body font size downward
+  const proseSizedLines = pageSummaries.flatMap((ps) =>
+    ps.lines.filter((l) => (l.text || '').length >= 25).map((l) => l.fontSize)
+  );
+  const allFontSizes = proseSizedLines.length
+    ? proseSizedLines
+    : pageSummaries.flatMap((ps) => ps.lines.map((l) => l.fontSize));
   const bodyFontSize = median(allFontSizes);
 
   // Detect repeated running headers & footers across pages (>= 2 pages)
+  // Exclude large display titles (fontSize > bodyFontSize * 1.18) from header counting
   const topRepeatCounts = new Map();
   const bottomRepeatCounts = new Map();
   if (pageSummaries.length >= 2) {
@@ -410,7 +455,7 @@ export function analyzeDocumentPages(pages, options = {}) {
         const yRatio = line.y / ps.height;
         const key = normalizeHeaderKey(line.text);
         if (!key || key.length < 3) continue;
-        if (yRatio < 0.12 && !seenTop.has(key)) {
+        if (yRatio < 0.12 && line.fontSize <= bodyFontSize * 1.18 && !seenTop.has(key)) {
           seenTop.add(key);
           topRepeatCounts.set(key, (topRepeatCounts.get(key) || 0) + 1);
         } else if (yRatio > 0.88 && !seenBottom.has(key)) {
@@ -421,6 +466,25 @@ export function analyzeDocumentPages(pages, options = {}) {
     }
   }
 
+  const isProseBodyLine = (line, ps) => {
+    const colWidth = ps.isTwoColumn && line.col !== 'full' ? ps.width * 0.43 : ps.width * 0.78;
+    const words = line.text.split(/\s+/).filter(Boolean);
+    const hasLowercaseProse = /[a-z]{3,}/.test(line.text);
+    const looksLikeFullSentence =
+      words.length >= 6 &&
+      /[.!?]$/.test(line.text) &&
+      line.fontSize >= bodyFontSize * 0.95 &&
+      hasLowercaseProse;
+    return (
+      !CAPTION_START_RE.test(line.text) &&
+      (looksLikeFullSentence ||
+        (line.width >= colWidth * 0.68 &&
+          words.length >= 7 &&
+          line.fontSize >= bodyFontSize * 0.90 &&
+          hasLowercaseProse))
+    );
+  };
+
   const skippedRegions = [];
   const paragraphs = [];
   const sentences = [];
@@ -428,7 +492,7 @@ export function analyzeDocumentPages(pages, options = {}) {
   let sentenceSeq = 0;
 
   for (const ps of pageSummaries) {
-    // Record skipped rotated margin watermarks (e.g. vertical arXiv stamps)
+    // Record skipped rotated margin watermarks (e.g. vertical arXiv stamps & y-axis labels)
     if (skipHeadersFooters && ps.rotatedItems.length > 0) {
       for (const rot of ps.rotatedItems) {
         skippedRegions.push({
@@ -447,13 +511,73 @@ export function analyzeDocumentPages(pages, options = {}) {
     }
 
     const ordered = sortLinesInReadingOrder(ps.lines, ps.isTwoColumn);
-    const bodyLines = [];
-    let activeCaptionCol = null;
-    let activeCaptionBottomY = -1;
+    const skipReasonByIdx = new Array(ordered.length).fill(null);
 
-    for (const line of ordered) {
+    // Pre-pass A: Mark Figure/Table captions & upward non-prose figure/chart zones above Figure captions
+    if (skipFigures) {
+      let activeCapCol = null;
+      let activeCapBottomY = -1;
+      let activeCapFontSize = bodyFontSize;
+      const figureCaptionIndices = [];
+
+      for (let i = 0; i < ordered.length; i++) {
+        const line = ordered[i];
+        if (CAPTION_START_RE.test(line.text)) {
+          skipReasonByIdx[i] = 'caption';
+          activeCapCol = line.col;
+          activeCapBottomY = line.y + line.height;
+          activeCapFontSize = line.fontSize;
+          if (FIGURE_CAPTION_START_RE.test(line.text)) {
+            figureCaptionIndices.push(i);
+          }
+          continue;
+        }
+        if (
+          activeCapCol === line.col &&
+          line.y - activeCapBottomY <= Math.max(line.height * 0.95, activeCapFontSize * 0.95) &&
+          line.fontSize <= Math.max(activeCapFontSize * 1.06, bodyFontSize * 0.98)
+        ) {
+          skipReasonByIdx[i] = 'caption';
+          activeCapBottomY = line.y + line.height;
+          continue;
+        }
+        activeCapCol = null;
+      }
+
+      // Walk upward from each Figure N caption in the same horizontal band to skip chart/diagram labels above it
+      for (const capIdx of figureCaptionIndices) {
+        const capLine = ordered[capIdx];
+        const capX1 = capLine.x - 28;
+        const capX2 = capLine.x + capLine.width + 28;
+        let prevY = capLine.y;
+        for (let j = capIdx - 1; j >= 0; j--) {
+          const cand = ordered[j];
+          if (cand.col !== capLine.col && capLine.col !== 'full') break;
+          // Must horizontally overlap the caption's column/figure span (never cross into another column)
+          const candX2 = cand.x + cand.width;
+          if (candX2 < capX1 || cand.x > capX2) continue;
+          // Stop if this is real body prose
+          if (isProseBodyLine(cand, ps)) break;
+          // Do not consume large Page 1 title or section headings above the figure
+          if (cand.fontSize > bodyFontSize * 1.18) break;
+          if (/^(?:\d+(?:\.\d+)*\s+[A-Z]|abstract|introduction)\b/i.test(cand.text)) break;
+          // Stop if far above the chart block
+          if (prevY - (cand.y + cand.height) > ps.height * 0.22) break;
+          skipReasonByIdx[j] = 'figure';
+          prevY = cand.y;
+        }
+      }
+    }
+
+    // Main pass: classify headers, footers, page numbers, footnotes, vector figure interiors
+    const bodyLines = [];
+    const footerActiveInCol = new Set();
+
+    for (let i = 0; i < ordered.length; i++) {
+      const line = ordered[i];
       const yRatio = line.y / ps.height;
       const bottomRatio = (line.y + line.height) / ps.height;
+      const centerXRatio = (line.x + line.width / 2) / ps.width;
       const normKey = normalizeHeaderKey(line.text);
       const normRect = {
         x: clamp01(line.x / ps.width),
@@ -472,51 +596,70 @@ export function analyzeDocumentPages(pages, options = {}) {
         });
       };
 
-      // 1. Standalone page number
+      // 0. Already marked as caption or caption-anchored figure label
+      if (skipReasonByIdx[i]) {
+        recordSkip(skipReasonByIdx[i]);
+        continue;
+      }
+
+      // 1. Standalone page number (avoid false positive on single math letter like 'i' inside a top diagram)
       if (
         skipPageNumbers &&
         PAGE_NUMBER_RE.test(line.text) &&
-        (yRatio < 0.1 || bottomRatio > 0.88)
+        (yRatio < 0.085 || bottomRatio > 0.88) &&
+        (!/^[ivx]$/i.test(line.text.trim()) ||
+          bottomRatio > 0.91 ||
+          Math.abs(centerXRatio - 0.5) < 0.14)
       ) {
         recordSkip('page-number');
         continue;
       }
 
-      // 2. Running header
+      // 2. Running header (never skip large Page 1 display titles!)
       if (
         skipHeadersFooters &&
+        line.fontSize <= bodyFontSize * 1.18 &&
         (yRatio < 0.068 || (yRatio < 0.12 && (topRepeatCounts.get(normKey) || 0) >= 2))
       ) {
         recordSkip('header');
         continue;
       }
 
-      // 3. Running footer / conference copyright / bottom margin
+      // 3. Running footer / conference copyright / bottom emails / continuation lines of an active footer block
       if (
         skipHeadersFooters &&
         (bottomRatio > 0.945 ||
           (bottomRatio > 0.88 && (bottomRepeatCounts.get(normKey) || 0) >= 2) ||
-          (bottomRatio > 0.78 && FOOTER_METADATA_RE.test(line.text)))
+          (bottomRatio > 0.70 && FOOTER_METADATA_RE.test(line.text)) ||
+          (bottomRatio > 0.72 &&
+            footerActiveInCol.has(line.col) &&
+            line.fontSize <= bodyFontSize * 0.96))
       ) {
+        if (bottomRatio > 0.70 && line.fontSize <= bodyFontSize * 0.96) {
+          footerActiveInCol.add(line.col);
+        }
         recordSkip('footer');
         continue;
       }
 
-      // 4. Footnotes near page bottom (smaller font size or footnote prefix)
+      // 4. Footnotes near page bottom (smaller font size, superscript/email prefix, or continuation)
       if (
         skipFootnotes &&
-        bottomRatio > 0.78 &&
-        line.fontSize <= bodyFontSize * 0.88 &&
-        (FOOTNOTE_PREFIX_RE.test(line.text) || FOOTER_METADATA_RE.test(line.text))
+        bottomRatio > 0.72 &&
+        line.fontSize <= bodyFontSize * 0.90 &&
+        (FOOTNOTE_PREFIX_RE.test(line.text) ||
+          EMAIL_RE.test(line.text) ||
+          FOOTER_METADATA_RE.test(line.text))
       ) {
+        footerActiveInCol.add(line.col);
         recordSkip('footnote');
         continue;
       }
 
-      // 5. Text inside figure / diagram graphic bounding boxes
+      // 5. Text inside raster or vector figure / diagram graphic bounding boxes
       if (skipFigures && ps.figureBoxes.length > 0) {
         const insideFigure = ps.figureBoxes.some(
-          (fig) => intersectionRatio(line, fig) >= 0.45 || rectsOverlap(line, fig, -1)
+          (fig) => intersectionRatio(line, fig) >= 0.35 || rectsOverlap(line, fig, 2)
         );
         if (insideFigure) {
           recordSkip('figure');
@@ -524,24 +667,13 @@ export function analyzeDocumentPages(pages, options = {}) {
         }
       }
 
-      // 6. Figure / Table captions (and their tightly wrapped continuation lines)
-      if (skipFigures) {
-        if (CAPTION_START_RE.test(line.text)) {
-          activeCaptionCol = line.col;
-          activeCaptionBottomY = line.y + line.height;
-          recordSkip('caption');
-          continue;
-        }
-        if (
-          activeCaptionCol === line.col &&
-          line.y - activeCaptionBottomY <= line.height * 0.85 &&
-          line.fontSize <= bodyFontSize * 0.96
-        ) {
-          activeCaptionBottomY = line.y + line.height;
-          recordSkip('caption');
-          continue;
-        }
-        activeCaptionCol = null;
+      // 6. Skip isolated tiny subscript/superscript noise lines (e.g. standalone "i j", "k", "1")
+      if (
+        line.fontSize < bodyFontSize * 0.74 &&
+        line.text.length <= 8 &&
+        !/[a-z]{3,}/i.test(line.text)
+      ) {
+        continue;
       }
 
       bodyLines.push(line);
@@ -650,12 +782,46 @@ export function analyzeDocumentPages(pages, options = {}) {
 }
 
 /**
- * Extract graphic/image bounding boxes from a PDF.js page's operator list
- * in top-down viewport coordinates so diagram/figure labels can be auto-skipped.
+ * Merge nearby bounding boxes within `gap` pixels into cohesive clusters.
+ */
+function clusterBoxes(rawBoxes, gap = 22) {
+  if (!rawBoxes.length) return [];
+  const clusters = rawBoxes.map((b) => ({ ...b }));
+  let merged = true;
+  while (merged) {
+    merged = false;
+    for (let i = 0; i < clusters.length; i++) {
+      for (let j = i + 1; j < clusters.length; j++) {
+        if (rectsOverlap(clusters[i], clusters[j], gap)) {
+          const a = clusters[i];
+          const b = clusters[j];
+          const x1 = Math.min(a.x, b.x);
+          const y1 = Math.min(a.y, b.y);
+          const x2 = Math.max(a.x + a.width, b.x + b.width);
+          const y2 = Math.max(a.y + a.height, b.y + b.height);
+          clusters[i] = { x: x1, y: y1, width: x2 - x1, height: y2 - y1 };
+          clusters.splice(j, 1);
+          merged = true;
+          break;
+        }
+      }
+      if (merged) break;
+    }
+  }
+  return clusters;
+}
+
+/**
+ * Extract raster image AND vector figure/chart bounding boxes from a PDF.js
+ * page's operator list in top-down viewport coordinates so diagram/plot labels
+ * (axes, legends, TikZ nodes, arrows) are automatically skipped.
  */
 export async function extractFigureBoxesFromPdfPage(pdfPage, viewport, OPS) {
   if (!pdfPage || !viewport || !OPS) return [];
-  const boxes = [];
+  const imageBoxes = [];
+  const vectorPrims = [];
+  const pageArea = Math.max(1, viewport.width * viewport.height);
+
   try {
     const opList = await pdfPage.getOperatorList();
     const stack = [];
@@ -675,6 +841,39 @@ export async function extractFigureBoxesFromPdfPage(pdfPage, viewport, OPS) {
       m[1] * x + m[3] * y + m[5],
     ];
 
+    const pointsToViewportBox = (pts) => {
+      if (!pts.length) return null;
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      for (const [px, py] of pts) {
+        if (!Number.isFinite(px) || !Number.isFinite(py)) continue;
+        const [vx, vy] = viewport.convertToViewportPoint(px, py);
+        if (!Number.isFinite(vx) || !Number.isFinite(vy)) continue;
+        if (vx < minX) minX = vx;
+        if (vy < minY) minY = vy;
+        if (vx > maxX) maxX = vx;
+        if (vy > maxY) maxY = vy;
+      }
+      if (!Number.isFinite(minX)) return null;
+      return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+    };
+
+    const recordVectorBox = (box) => {
+      if (!box) return;
+      const { width, height } = box;
+      // Ignore full-page frames/clipping rectangles
+      if (width * height > pageArea * 0.72) return;
+      // Ignore thin horizontal divider rules (header/footer/footnote rules)
+      if (height < 6 && width > viewport.width * 0.14) return;
+      // Ignore thin vertical column rules
+      if (width < 6 && height > viewport.height * 0.55) return;
+      // Ignore microscopic dots/text underlines
+      if (width < 3 && height < 3) return;
+      vectorPrims.push(box);
+    };
+
     for (let i = 0; i < opList.fnArray.length; i++) {
       const fn = opList.fnArray[i];
       const args = opList.argsArray[i];
@@ -686,35 +885,107 @@ export async function extractFigureBoxesFromPdfPage(pdfPage, viewport, OPS) {
       } else if (fn === OPS.transform && Array.isArray(args) && args.length === 6) {
         ctm = multiply(ctm, args);
       } else if (
+        OPS.paintFormXObjectBegin &&
+        fn === OPS.paintFormXObjectBegin &&
+        Array.isArray(args)
+      ) {
+        stack.push([...ctm]);
+        if (Array.isArray(args[0]) && args[0].length === 6) {
+          ctm = multiply(ctm, args[0]);
+        }
+      } else if (OPS.paintFormXObjectEnd && fn === OPS.paintFormXObjectEnd) {
+        ctm = stack.pop() || [1, 0, 0, 1, 0, 0];
+      } else if (
         fn === OPS.paintImageXObject ||
         fn === OPS.paintInlineImageXObject ||
         fn === OPS.paintImageMaskXObject
       ) {
-        // Unit square [0,0]..[1,1] transformed by CTM, then by viewport transform
-        const corners = [
+        const pts = [
           transformPoint(ctm, 0, 0),
           transformPoint(ctm, 1, 0),
           transformPoint(ctm, 0, 1),
           transformPoint(ctm, 1, 1),
-        ].map(([px, py]) => viewport.convertToViewportPoint(px, py));
-
-        const xs = corners.map((c) => c[0]);
-        const ys = corners.map((c) => c[1]);
-        const x = Math.min(...xs);
-        const y = Math.min(...ys);
-        const width = Math.max(...xs) - x;
-        const height = Math.max(...ys) - y;
-
-        // Ignore tiny decorative icons or full-page background scans
-        const pageArea = viewport.width * viewport.height;
-        const boxArea = width * height;
-        if (width >= 40 && height >= 40 && boxArea < pageArea * 0.72) {
-          boxes.push({ x, y, width, height });
+        ];
+        const box = pointsToViewportBox(pts);
+        if (box && box.width >= 40 && box.height >= 40 && box.width * box.height < pageArea * 0.72) {
+          imageBoxes.push(box);
         }
+      } else if (OPS.constructPath && fn === OPS.constructPath && Array.isArray(args)) {
+        const subOps = args[0] || [];
+        const coords = args[1] || [];
+        const minMax = args[2];
+        const pts = [];
+
+        if (Array.isArray(minMax) && minMax.length === 4 && Number.isFinite(minMax[0])) {
+          pts.push(
+            transformPoint(ctm, minMax[0], minMax[1]),
+            transformPoint(ctm, minMax[2], minMax[1]),
+            transformPoint(ctm, minMax[0], minMax[3]),
+            transformPoint(ctm, minMax[2], minMax[3])
+          );
+        } else {
+          let ci = 0;
+          for (let k = 0; k < subOps.length; k++) {
+            const op = subOps[k];
+            if (op === OPS.moveTo || op === OPS.lineTo) {
+              pts.push(transformPoint(ctm, coords[ci], coords[ci + 1]));
+              ci += 2;
+            } else if (op === OPS.curveTo) {
+              pts.push(
+                transformPoint(ctm, coords[ci], coords[ci + 1]),
+                transformPoint(ctm, coords[ci + 2], coords[ci + 3]),
+                transformPoint(ctm, coords[ci + 4], coords[ci + 5])
+              );
+              ci += 6;
+            } else if (
+              (OPS.curveTo2 && op === OPS.curveTo2) ||
+              (OPS.curveTo3 && op === OPS.curveTo3)
+            ) {
+              pts.push(
+                transformPoint(ctm, coords[ci], coords[ci + 1]),
+                transformPoint(ctm, coords[ci + 2], coords[ci + 3])
+              );
+              ci += 4;
+            } else if (op === OPS.rectangle) {
+              const rx = coords[ci];
+              const ry = coords[ci + 1];
+              const rw = coords[ci + 2];
+              const rh = coords[ci + 3];
+              pts.push(
+                transformPoint(ctm, rx, ry),
+                transformPoint(ctm, rx + rw, ry),
+                transformPoint(ctm, rx, ry + rh),
+                transformPoint(ctm, rx + rw, ry + rh)
+              );
+              ci += 4;
+            }
+          }
+        }
+        recordVectorBox(pointsToViewportBox(pts));
+      } else if (OPS.rectangle && fn === OPS.rectangle && Array.isArray(args) && args.length >= 4) {
+        const [rx, ry, rw, rh] = args;
+        const pts = [
+          transformPoint(ctm, rx, ry),
+          transformPoint(ctm, rx + rw, ry),
+          transformPoint(ctm, rx, ry + rh),
+          transformPoint(ctm, rx + rw, ry + rh),
+        ];
+        recordVectorBox(pointsToViewportBox(pts));
       }
     }
   } catch {
-    return [];
+    return imageBoxes;
   }
-  return boxes;
+
+  // Cluster vector graphic primitives into figure/chart regions (padded gently for axis/node labels)
+  const vectorClusters = clusterBoxes(vectorPrims, 24)
+    .filter((b) => b.width >= 55 && b.height >= 45 && b.width * b.height < pageArea * 0.72)
+    .map((b) => ({
+      x: Math.max(0, b.x - 14),
+      y: Math.max(0, b.y - 16),
+      width: Math.min(viewport.width, b.width + 28),
+      height: Math.min(viewport.height, b.height + 34),
+    }));
+
+  return clusterBoxes([...imageBoxes, ...vectorClusters], 12);
 }
