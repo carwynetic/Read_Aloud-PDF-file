@@ -115,6 +115,8 @@ function intersectionRatio(itemRect, figBox) {
 
 /**
  * Group raw text items into visual lines (items sharing a baseline within column).
+ * Uses true horizontal segment & center-gutter analysis so 1-column LaTeX papers
+ * with small word-level PDF.js items are never misclassified as 2-column.
  */
 function buildVisualLines(items, pageWidth, pageHeight) {
   const rotatedItems = [];
@@ -140,69 +142,165 @@ function buildVisualLines(items, pageWidth, pageHeight) {
 
   if (!valid.length) return { lines: [], isTwoColumn: false, rotatedItems };
 
-  // Sort primarily by y, secondarily by x
+  // 1. Group items into horizontal baseline rows across the full page width
   valid.sort((a, b) => (Math.abs(a.y - b.y) <= 3 ? a.x - b.x : a.y - b.y));
-
-  // Detect if page has a clear 2-column vertical gutter around the center
-  const midX = pageWidth * 0.5;
-  const leftCount = valid.filter((it) => it.x + it.width < midX + pageWidth * 0.02).length;
-  const rightCount = valid.filter((it) => it.x > midX - pageWidth * 0.02).length;
-  const crossingCenter = valid.filter(
-    (it) => it.x < midX - pageWidth * 0.04 && it.x + it.width > midX + pageWidth * 0.04 && it.width > pageWidth * 0.35
-  );
-  const isTwoColumn = leftCount >= 3 && rightCount >= 3 && crossingCenter.length < valid.length * 0.45;
-
-  // Group into lines without merging across the center column gutter
-  const lines = [];
+  const rows = [];
   for (const it of valid) {
-    const col = isTwoColumn
-      ? it.x + it.width < midX + pageWidth * 0.02
-        ? 'left'
-        : it.x > midX - pageWidth * 0.02
-          ? 'right'
-          : 'full'
-      : 'full';
-
-    let target = null;
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const candidate = lines[i];
-      if (candidate.col !== col) continue;
-      const yTol = Math.max(4, Math.min(candidate.height, it.height) * 0.55);
-      if (Math.abs(candidate.y - it.y) <= yTol) {
-        // Don't merge wildly separated horizontal chunks (e.g. diagram labels)
-        const gap = it.x - (candidate.x + candidate.width);
-        if (gap < Math.max(36, candidate.height * 4.5)) {
-          target = candidate;
-          break;
-        }
+    let targetRow = null;
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const row = rows[i];
+      const yTol = Math.max(4, Math.min(row.height, it.height) * 0.55);
+      if (Math.abs(row.y - it.y) <= yTol) {
+        targetRow = row;
+        break;
       }
     }
-
-    if (target) {
-      target.items.push(it);
-      const minX = Math.min(target.x, it.x);
-      const maxX = Math.max(target.x + target.width, it.x + it.width);
-      const minY = Math.min(target.y, it.y);
-      const maxY = Math.max(target.y + target.height, it.y + it.height);
-      target.x = minX;
-      target.y = minY;
-      target.width = maxX - minX;
-      target.height = maxY - minY;
+    if (targetRow) {
+      targetRow.items.push(it);
+      targetRow.y = (targetRow.y * (targetRow.items.length - 1) + it.y) / targetRow.items.length;
+      targetRow.height = Math.max(targetRow.height, it.height);
     } else {
-      lines.push({
-        col,
-        x: it.x,
-        y: it.y,
-        width: it.width,
-        height: it.height,
-        items: [it],
-        pageWidth,
-        pageHeight,
-      });
+      rows.push({ y: it.y, height: it.height, items: [it] });
+    }
+  }
+
+  // 2. Merge adjacent items within each row into continuous horizontal segments
+  const midX = pageWidth * 0.5;
+  let splitGutterRows = 0;
+  let continuousCrossingCount = 0;
+
+  for (const row of rows) {
+    row.items.sort((a, b) => a.x - b.x);
+    const segments = [];
+    for (const it of row.items) {
+      const prev = segments[segments.length - 1];
+      const maxIntraWordGap = Math.max(22, Math.min(prev ? prev.height : it.height, it.height) * 2.2);
+      if (prev && it.x - (prev.x + prev.width) <= maxIntraWordGap) {
+        prev.items.push(it);
+        const minX = Math.min(prev.x, it.x);
+        const maxX = Math.max(prev.x + prev.width, it.x + it.width);
+        const minY = Math.min(prev.y, it.y);
+        const maxY = Math.max(prev.y + prev.height, it.y + it.height);
+        prev.x = minX;
+        prev.y = minY;
+        prev.width = maxX - minX;
+        prev.height = maxY - minY;
+      } else {
+        segments.push({
+          x: it.x,
+          y: it.y,
+          width: it.width,
+          height: it.height,
+          items: [it],
+        });
+      }
+    }
+    row.segments = segments;
+
+    // Check if this row has a true 2-column gutter around midX vs continuous crossing text
+    const leftSegs = segments.filter((s) => s.x + s.width < midX + pageWidth * 0.02);
+    const rightSegs = segments.filter((s) => s.x > midX - pageWidth * 0.02);
+    const crossingSegs = segments.filter(
+      (s) => s.x < midX - pageWidth * 0.05 && s.x + s.width > midX + pageWidth * 0.05
+    );
+
+    if (crossingSegs.length > 0) {
+      // Count continuous body-sized segments crossing the center
+      if (crossingSegs.some((s) => s.height <= 14)) {
+        continuousCrossingCount += 1;
+      }
+    } else if (leftSegs.length > 0 && rightSegs.length > 0) {
+      const leftEdge = Math.max(...leftSegs.map((s) => s.x + s.width));
+      const rightEdge = Math.min(...rightSegs.map((s) => s.x));
+      if (rightEdge - leftEdge >= Math.max(12, row.height * 1.1)) {
+        splitGutterRows += 1;
+      }
+    }
+  }
+
+  // Only treat page as 2-column if there is a clear repeated center gutter and very few continuous crossing lines
+  const isTwoColumn =
+    splitGutterRows >= 3 &&
+    continuousCrossingCount <= Math.max(2, Math.floor(splitGutterRows * 0.25));
+
+  // 3. Emit final visual lines tagged with 'left' | 'right' | 'full'
+  const lines = [];
+  for (const row of rows) {
+    if (!isTwoColumn) {
+      // Merge segments in the row unless separated by a huge diagram/table gap
+      for (const seg of row.segments) {
+        const last = lines[lines.length - 1];
+        if (
+          last &&
+          last.rowRef === row &&
+          seg.x - (last.x + last.width) < Math.max(36, last.height * 4.5)
+        ) {
+          last.items.push(...seg.items);
+          const minX = Math.min(last.x, seg.x);
+          const maxX = Math.max(last.x + last.width, seg.x + seg.width);
+          const minY = Math.min(last.y, seg.y);
+          const maxY = Math.max(last.y + last.height, seg.y + seg.height);
+          last.x = minX;
+          last.y = minY;
+          last.width = maxX - minX;
+          last.height = maxY - minY;
+        } else {
+          lines.push({
+            col: 'full',
+            rowRef: row,
+            x: seg.x,
+            y: seg.y,
+            width: seg.width,
+            height: seg.height,
+            items: [...seg.items],
+            pageWidth,
+            pageHeight,
+          });
+        }
+      }
+    } else {
+      for (const seg of row.segments) {
+        const col =
+          seg.x + seg.width < midX + pageWidth * 0.02
+            ? 'left'
+            : seg.x > midX - pageWidth * 0.02
+              ? 'right'
+              : 'full';
+        const last = lines[lines.length - 1];
+        if (
+          last &&
+          last.rowRef === row &&
+          last.col === col &&
+          seg.x - (last.x + last.width) < Math.max(36, last.height * 4.5)
+        ) {
+          last.items.push(...seg.items);
+          const minX = Math.min(last.x, seg.x);
+          const maxX = Math.max(last.x + last.width, seg.x + seg.width);
+          const minY = Math.min(last.y, seg.y);
+          const maxY = Math.max(last.y + last.height, seg.y + seg.height);
+          last.x = minX;
+          last.y = minY;
+          last.width = maxX - minX;
+          last.height = maxY - minY;
+        } else {
+          lines.push({
+            col,
+            rowRef: row,
+            x: seg.x,
+            y: seg.y,
+            width: seg.width,
+            height: seg.height,
+            items: [...seg.items],
+            pageWidth,
+            pageHeight,
+          });
+        }
+      }
     }
   }
 
   for (const line of lines) {
+    delete line.rowRef;
     line.items.sort((a, b) => a.x - b.x);
     // Merge kerning-split adjacent PDF.js items (gap <= ~0.14 * fontHeight) without bogus spaces
     const mergedItems = [];

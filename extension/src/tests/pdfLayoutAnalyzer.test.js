@@ -376,4 +376,52 @@ describe('pdfLayoutAnalyzer', () => {
     expect(boxes[0].width).toBeGreaterThanOrEqual(190);
     expect(boxes[0].height).toBeGreaterThanOrEqual(140);
   });
+
+  it('keeps single-column LaTeX pages (many small word items per line) in natural full-line reading order without splitting left/right', () => {
+    // Simulates a single-column arXiv paper like KAN where PDF.js splits each line into small word items
+    const pages = [
+      {
+        pageNumber: 1,
+        width: 600,
+        height: 800,
+        figureBoxes: [],
+        items: [
+          // Title
+          item('KAN: Kolmogorov–Arnold Networks', 150, 100, 300, 16),
+          // Authors split into small items across the line
+          item('Ziming Liu', 110, 145, 70, 10),
+          item('Yixuan Wang', 195, 145, 80, 10),
+          item('Sachin Vaidya', 290, 145, 85, 10),
+          item('Fabian Ruehle', 390, 145, 85, 10),
+          // Abstract heading
+          item('Abstract', 275, 220, 50, 12),
+          // Single-column body lines split into small word-level items crossing midX (300)
+          item('Inspired by the', 90, 250, 80, 10.5),
+          item('Kolmogorov-Arnold', 175, 250, 95, 10.5),
+          item('representation theorem,', 275, 250, 115, 10.5),
+          item('we propose KANs.', 395, 250, 95, 10.5),
+
+          item('While MLPs have', 90, 266, 85, 10.5),
+          item('fixed activation functions on', 180, 266, 130, 10.5),
+          item('nodes ("neurons"),', 315, 266, 95, 10.5),
+          item('KANs have learnable', 415, 266, 95, 10.5),
+
+          item('activation functions on', 90, 282, 115, 10.5),
+          item('edges ("weights").', 210, 282, 95, 10.5),
+          item('KANs have no linear', 310, 282, 100, 10.5),
+          item('weights at all.', 415, 282, 85, 10.5),
+        ],
+      },
+    ];
+
+    const doc = analyzeDocumentPages(pages);
+    expect(doc.sentences.map((s) => s.text)).toEqual([
+      'KAN: Kolmogorov–Arnold Networks',
+      'Ziming Liu Yixuan Wang Sachin Vaidya Fabian Ruehle',
+      'Abstract',
+      'Inspired by the Kolmogorov-Arnold representation theorem, we propose KANs.',
+      'While MLPs have fixed activation functions on nodes ("neurons"), KANs have learnable activation functions on edges ("weights").',
+      'KANs have no linear weights at all.',
+    ]);
+  });
 });
